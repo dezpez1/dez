@@ -81,7 +81,10 @@ enum Mood: String, CaseIterable, Identifiable, Sendable {
 /// point of the mode, so it's a named constant rather than a magic float.
 enum Breath {
     static let groundedCycleSeconds: Float = 11.0
-    static let ambientCycleSeconds: Float = 17.0   // slower + looser when not grounding
+    /// Ambient sits between "barely moving" and "alive and flowing" — fast
+    /// enough that the field is visibly going somewhere, slow enough that it
+    /// never asks for attention.
+    static let ambientCycleSeconds: Float = 13.0
 }
 
 @MainActor
@@ -90,6 +93,10 @@ final class FieldState {
     static let maxBlooms = 32
 
     private(set) var blooms: [Bloom] = []
+
+    /// The two axes of the look, deliberately independent — any form renders
+    /// in any palette.
+    var form: Form = .smoke
     var mood: Mood = .drift
 
     /// 0 = normal, 1 = fully grounded. Eased, never snapped — a hard cut to

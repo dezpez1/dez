@@ -43,7 +43,10 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
     /// off in the present pass rather than clipping mid-field.
     private static let accumFormat: MTLPixelFormat = .rgba16Float
 
-    init?(view: MTKView, state: FieldState) {
+    /// Preview tiles run several renderers at once on the picker screen, so
+    /// they render at half rate. Everything else about them is identical —
+    /// what you see in a tile is the real field, not an approximation.
+    init?(view: MTKView, state: FieldState, preview: Bool = false) {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else { return nil }
         self.device = device
@@ -54,7 +57,7 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
         view.device = device
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = false
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = preview ? 30 : 60
         view.isPaused = false
         view.enableSetNeedsDisplay = false
 
@@ -175,7 +178,8 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                                state.elapsed, state.breathPhase),
                 groundCount: SIMD4(state.grounding,
                                    Float(state.blooms.count),
-                                   state.seed, 0),
+                                   state.seed,
+                                   Float(state.form.rawValue)),
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),

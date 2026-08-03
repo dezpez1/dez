@@ -3,15 +3,20 @@
 //  The living surface. Everything the user stares into is computed here.
 //
 //  Two passes:
-//    1. fieldFragment  — domain-warped fbm + touch blooms, blended with the
+//    1. fieldFragment  — the selected Form + touch blooms, blended with the
 //                        previous frame so strokes persist and get woven in.
 //    2. presentFragment — tonemap the accumulation buffer to the drawable.
 //
-//  Safety constraints baked into the math, not bolted on:
+//  Forms are branches inside fieldFragment. They share the bloom math, the
+//  palette, the breath, and the grounding treatment; they differ only in how
+//  they turn a point into a scalar. Adding a form is adding a function and a
+//  case — nothing outside this file needs to know.
+//
+//  Safety constraints are in the math, not bolted on:
 //    - No strobe. Every animated term is a slow sine or an exponential decay.
-//      Nothing in here can produce a hard flash.
-//    - Luminance is soft-clamped in the present pass so a pile of overlapping
-//      blooms can brighten the field but never blow it out.
+//      There is no path through this shader that produces a hard flash.
+//    - Luminance is soft-clamped in the present pass, so a pile of overlapping
+//      blooms brightens the field but can never blow out to white.
 //
 
 #include <metal_stdlib>
@@ -20,10 +25,13 @@ using namespace metal;
 constant int MAX_BLOOMS = 32;
 constant float TAU = 6.28318530718;
 
+constant int FORM_SMOKE = 0;
+constant int FORM_KALEIDOSCOPE = 1;
+
 // Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
 struct Uniforms {
     float4 resTime;     // xy = resolution px, z = time s, w = breath phase 0..1
-    float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = spare
+    float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = form
     float4 palA;        // IQ cosine palette: bias
     float4 palB;        //                    amplitude
     float4 palC;        //                    frequency
@@ -46,6 +54,8 @@ vertex VertexOut fullscreenVertex(uint vid [[vertex_id]]) {
     out.uv = p;
     return out;
 }
+
+// MARK: - Noise
 
 static inline float hash21(float2 p) {
     p = fract(p * float2(123.34, 456.21));
@@ -75,11 +85,90 @@ static inline float fbm(float2 p) {
     return v;
 }
 
+/// Ridged fbm — sharp creases where plain fbm gives soft blobs. This is what
+/// pulls veins and filaments out of the smoke instead of leaving a wash.
+static inline float ridged(float2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 5; i++) {
+        float n = 1.0 - abs(valueNoise(p) * 2.0 - 1.0);
+        v += a * n * n;
+        p *= 2.03;
+        a *= 0.5;
+    }
+    return v;
+}
+
 // Inigo Quilez cosine palette. Smooth and cyclic by construction, which is
 // why it can't produce a hard color jump.
 static inline float3 palette(float t, float4 a, float4 b, float4 c, float4 d) {
     return a.rgb + b.rgb * cos(TAU * (c.rgb * t + d.rgb));
 }
+
+// MARK: - Forms
+
+/// Smoke — two-level domain-warped fbm with a ridged overlay for definition.
+/// Returns a scalar the caller maps through the palette.
+static inline float smokeField(float2 p, float drift, float breathWave, float2 warp,
+                               thread float &detail) {
+    float2 q = float2(fbm(p + drift * 0.062),
+                      fbm(p + float2(5.2, 1.3) + drift * 0.053));
+    float2 r = float2(fbm(p + 3.6 * q + float2(1.7, 9.2) + drift * 0.043),
+                      fbm(p + 3.6 * q + float2(8.3, 2.8) + drift * 0.038));
+    float f = fbm(p + 3.6 * r + warp * 3.0);
+
+    // Ridges ride the same warped space, so the creases follow the flow
+    // instead of sitting on top of it as unrelated texture.
+    detail = ridged(p * 1.7 + 2.2 * r + warp * 2.0);
+
+    // Widen the range fed to the palette so a single frame spans more of the
+    // color sweep — the old version hovered near one hue and read as flat.
+    return f * 1.35 + length(r) * 0.42 + breathWave * 0.05;
+}
+
+/// Kaleidoscope — sixfold mirror symmetry over a Kali-set inversion fractal.
+/// The orbit traps supply self-similar detail at every scale, which is the
+/// thing that rewards looking closer.
+static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
+                                      float2 warp, thread float &detail) {
+    // Fold into one wedge and mirror. Doing this before the fractal means the
+    // detail is symmetric rather than symmetry being painted over noise.
+    const float segments = 6.0;
+    float seg = TAU / segments;
+    // atan2 returns -pi..pi, and fmod keeps the sign of its dividend — folding
+    // a negative angle directly leaves hard seams down the mirror lines. Lift
+    // into positive territory first so the wedge wraps cleanly.
+    float ang = atan2(p.y, p.x) + TAU;
+    float rad = length(p);
+    ang = fmod(ang, seg);
+    ang = abs(ang - seg * 0.5);
+    float2 q = float2(cos(ang), sin(ang)) * rad;
+
+    q += warp * 0.8;                       // touches distort the symmetry
+
+    float rot = drift * 0.026;             // very slow turn
+    float cs = cos(rot), sn = sin(rot);
+    q = float2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
+    q *= 1.35 + breathWave * 0.10;         // breath zooms the fractal
+
+    // Kali set: z = |z| / dot(z,z) - c. The constant drifts slowly, which
+    // makes the whole structure evolve rather than sit still.
+    float2 z = q;
+    float2 c = float2(0.72 + 0.055 * sin(drift * 0.021),
+                      0.51 + 0.055 * cos(drift * 0.017));
+    float trapRadial = 1e9;
+    float trapAxis = 1e9;
+    for (int i = 0; i < 9; i++) {
+        z = abs(z) / max(dot(z, z), 1e-5) - c;
+        trapRadial = min(trapRadial, length(z));
+        trapAxis = min(trapAxis, abs(z.x));
+    }
+
+    detail = 1.0 - clamp(trapAxis * 5.5, 0.0, 1.0);   // bright filament cores
+    return trapRadial * 1.45 + trapAxis * 0.85 + breathWave * 0.04;
+}
+
+// MARK: - Field pass
 
 fragment float4 fieldFragment(VertexOut in [[stage_in]],
                               constant Uniforms &u        [[buffer(0)]],
@@ -92,6 +181,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float grounding = u.groundCount.x;
     int bloomCount = int(u.groundCount.y);
     float seed = u.groundCount.z;
+    int form = int(u.groundCount.w);
 
     // Aspect-corrected field space, origin at center.
     float2 uv = in.uv;
@@ -104,38 +194,56 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     p *= zoom;
 
     // Grounding slows drift to a near-stop rather than freezing hard.
-    float drift = time * mix(1.0, 0.25, grounding);
+    float drift = (time + seed * 7.0) * mix(1.0, 0.22, grounding);
 
-    // Accumulate bloom influence: a radial push plus a soft expanding ring.
+    // ── Blooms ─────────────────────────────────────────────────────────────
+    // A touch does three things: pushes the field outward, throws an expanding
+    // ring, and leaves a bright core. Deliberately dramatic — the input is
+    // supposed to feel like it did something.
     float2 warp = float2(0.0);
     float glow = 0.0;
+    float shock = 0.0;
     for (int i = 0; i < MAX_BLOOMS; i++) {
         if (i >= bloomCount) break;
         Bloom b = blooms[i];
         float age = max(time - b.z, 0.0);
         float2 d = p - b.xy;
         float dist = length(d);
-        float radius = age * 0.16;                       // expands slowly
-        float ring = exp(-pow((dist - radius) * 7.0, 2.0));
-        float decay = exp(-age * 0.28);                  // long, gentle tail
-        // A bright, fast-fading core so a touch reads immediately, plus the
-        // slower ring that travels outward from it.
-        float core = exp(-dist * dist * 55.0) * exp(-age * 1.1);
-        warp += normalize(d + 1e-6) * ring * decay * 0.12 * b.w;
-        glow += (ring * decay + core) * b.w;
+
+        float radius = age * 0.30;                         // travels faster now
+        float ring = exp(-pow((dist - radius) * 5.5, 2.0));
+        float decay = exp(-age * 0.26);                    // long, gentle tail
+        float core = exp(-dist * dist * 42.0) * exp(-age * 1.0);
+
+        // Radial displacement, strongest right at the wavefront.
+        warp += normalize(d + 1e-6) * ring * decay * 0.26 * b.w;
+        glow += (ring * decay * 1.15 + core * 1.4) * b.w;
+        // Pushes the palette hue as the wave passes, so a touch reads as a
+        // color event and not only a brightness one.
+        shock += ring * decay * b.w;
     }
 
-    // Domain warping — two levels. This is what makes it read as organic
-    // rather than as noise.
-    float2 q = float2(fbm(p + seed + drift * 0.045),
-                      fbm(p + float2(5.2, 1.3) + drift * 0.038));
-    float2 r = float2(fbm(p + 3.6 * q + float2(1.7, 9.2) + drift * 0.031),
-                      fbm(p + 3.6 * q + float2(8.3, 2.8) + drift * 0.027));
-    float f = fbm(p + 3.6 * r + warp * 3.0);
+    // ── Form ───────────────────────────────────────────────────────────────
+    float detail = 0.0;
+    float t;
+    if (form == FORM_KALEIDOSCOPE) {
+        t = kaleidoscopeField(p, drift, breathWave, warp, detail);
+    } else {
+        t = smokeField(p, drift, breathWave, warp, detail);
+    }
 
-    // Color from the intention-seeded palette.
-    float t = f + 0.25 * length(r) + breathWave * 0.04;
+    t += shock * 0.30;
+
     float3 col = palette(t, u.palA, u.palB, u.palC, u.palD);
+
+    // Detail lifts the creases toward a shifted point in the same palette,
+    // which keeps it in key instead of adding grey highlights.
+    col = mix(col, palette(t + 0.18, u.palA, u.palB, u.palC, u.palD) * 1.22,
+              detail * 0.42);
+
+    // Contrast. The old field sat in the middle of its range and read washed
+    // out; this pushes darks down and lets the bright structure separate.
+    col = col * col * (3.0 - 2.0 * col);
 
     // Blooms brighten toward the warm end of the palette.
     col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD) * glow * 1.05;
@@ -154,11 +262,12 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // Feedback: blend with the previous frame, slightly contracted so trails
     // drift inward instead of smearing outward. This is what makes strokes
     // persist and slowly become part of the pattern.
+    //
+    // Tuned by eye against the simulator: much above ~0.55 and both the fresh
+    // structure and a new bloom drown in their own history.
     float2 fbUV = (uv - 0.5) * 0.998 + 0.5;
     float3 history = prev.sample(smp, fbUV).rgb;
-    // Tuned by eye against the simulator: much above ~0.55 and a fresh bloom
-    // is drowned by its own history before it can read as a touch.
-    float persistence = mix(0.72, 0.86, grounding);   // holds longer when grounded
+    float persistence = mix(0.66, 0.84, grounding);   // holds longer when grounded
     col = mix(col, history, persistence * 0.72);
 
     return float4(col, 1.0);
@@ -171,10 +280,15 @@ fragment float4 presentFragment(VertexOut in [[stage_in]],
 
     // Soft-clamp rather than hard clip: overlapping blooms can pile up
     // brightness, and this rolls it off instead of letting it flash white.
-    c = c / (1.0 + c * 0.55);
+    c = c / (1.0 + c * 0.50);
+
+    // Saturation lift. The tonemap desaturates as it rolls off, and the ask
+    // was for rich color, so this puts back what the curve takes out.
+    float lum = dot(c, float3(0.299, 0.587, 0.114));
+    c = clamp(mix(float3(lum), c, 1.28), 0.0, 1.0);
 
     // Mild lift so deep areas keep some color instead of crushing to black.
-    c = pow(max(c, 0.0), float3(0.92));
+    c = pow(max(c, 0.0), float3(0.90));
 
     return float4(c, 1.0);
 }
