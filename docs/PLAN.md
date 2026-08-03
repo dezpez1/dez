@@ -31,12 +31,27 @@ Working-name options to offer them: **Mycelium** (two nodes, one living network 
 
 ## Tech
 
-- **Web app (PWA), not native.** One codebase, runs on both phones instantly via URL, fullscreen-capable, and sidesteps app-store policy friction entirely for this subject matter
-- **Stack:** Vite + React + WebGL shaders for the field (Three.js or regl — shader-quality visuals are the whole "looks cool" requirement; Canvas2D won't cut it)
-- **Sync:** tiny Node WebSocket server relaying touch/stroke/state events (~100 lines; deploy on Fly/Railway). Sync events, not pixels — both clients deterministically render the same field from the same event stream (also gives replay for free: the Morning View replays the event log)
-- **Audio:** MediaRecorder API; store locally during session, upload after
-- **Transcription + summary:** async next-day job — Whisper (or equivalent) for transcripts, Claude API for the integration summary. *Implementation note: consult the `claude-api` skill before writing any API code (per its trigger rules)*
-- **Repo:** app code lives in `dezpez1/dez`
+**Native iOS, deployed from Xcode.** (Superseded the original PWA plan — they're
+shipping to their own devices via Xcode, so App Store policy is irrelevant, and
+native buys three things the web couldn't: Metal instead of WebGL, real
+CoreHaptics for the grounding pulse, and peer-to-peer sync with no server.)
+
+- **Stack:** Swift + SwiftUI + Metal. Deployment target iOS 17, `TARGETED_DEVICE_FAMILY = 1,2`
+- **The Field:** two-pass Metal renderer with a ping-pong accumulation buffer.
+  Pass 1 computes domain-warped fbm + touch blooms and blends with the previous
+  frame; pass 2 tonemaps to the drawable. The feedback buffer is what makes
+  strokes persist and get woven into the pattern
+- **Sync:** `MultipeerConnectivity` — peer-to-peer over WiFi/Bluetooth, **no
+  server to deploy and no session data leaving the two devices**. Sync events,
+  not pixels: the field is a pure function of `(time, seed, bloom log)`, so
+  replaying the log reproduces a session exactly. Replay comes free
+- **Audio:** `AVAudioRecorder`, written to the app container
+- **Transcription:** Apple's on-device `Speech` framework — keeps voice memos
+  of tripping people off the network entirely
+- **Summary:** Claude API, the one thing that leaves the device, and only on
+  explicit opt-in. *Implementation note: consult the `claude-api` skill before
+  writing any API code (per its trigger rules)*
+- **Repo:** app code lives in `dezpez1/dez` under `ios/Mycelium`
 
 ## Privacy & safety (non-negotiable)
 
@@ -48,9 +63,9 @@ Working-name options to offer them: **Mycelium** (two nodes, one living network 
 
 ## Build order (MVP)
 
-1. **The Field, solo:** Vite + React + shader canvas; breathing ambient visual with palette seeds; touch → persistent blooms. (This alone is demoable and "looks cool on mushrooms")
-2. **Ground Me:** gesture + slow/dim/breath state in the shader
-3. **Two-player sync:** WS server + session codes; event-stream architecture with deterministic rendering
+1. ~~**The Field, solo:**~~ **DONE** — Metal shader canvas, breathing ambient visual with palette seeds, touch → persistent blooms
+2. ~~**Ground Me:**~~ **DONE** — two-finger hold → dim/desaturate/slow + haptic breath pulse
+3. **Two-player sync:** MultipeerConnectivity + session codes; event-stream architecture with deterministic rendering
 4. **Capture:** hold-to-talk, local audio storage, timestamps on the event stream
 5. **Before screen:** intention + palette seeding
 6. **Morning View:** event-log replay, async transcription, Claude integration summary, gallery save

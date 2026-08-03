@@ -2,3 +2,19 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Session data — recordings, transcripts, and summaries never get committed.
+# This repo is public and these are voice memos from a trip.
+sessions/
+recordings/
+*.m4a
+*.caf
+.env
