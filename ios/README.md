@@ -48,7 +48,7 @@ duplication and buys every combination being one worth shipping.
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
 | `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
 | `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
-| `mycelial` | A colony growing. Filaments radiate from three drifting origins and fork as they advance, behind a growth front that sweeps outward and dies back. |
+| `mycelial` | Three cellular nets at once over a domain-warped space — thick cords, a mid net, and fine hyphae filling every enclosed region. Built against a photograph of a real network. |
 
 | Form | Palettes |
 |---|---|
@@ -56,6 +56,9 @@ duplication and buys every combination being one worth shipping.
 | `lattice` | Neon · Chrome · Ultraviolet · Signal |
 | `weave` | Rust · Jade · Ash · Saffron |
 | `mycelial` | Spore · Fungal · Deep · Filament |
+
+Mycelial costs three Worley lookups plus two `fbm3` calls per pixel — the most
+expensive form by some way, and the reason the picker caps at four live tiles.
 
 The mycelial palettes are built so `t = 0` is exactly black (`a == b`, `d = 0.5`,
 so `a + b·cos(π)` vanishes). Every other form fills the screen with colour; that
@@ -97,8 +100,8 @@ people who can't read a UI and shouldn't have to hit a target.
 an identical field. Position is still written to the event log — it costs
 nothing and the log is what sync and replay are built on — but no shader reads
 it. On `mycelial`, where a positional touch would have seeded growth at a point,
-a tap instead surges the *whole* colony — every growth front is driven forward
-at once.
+a tap instead drives the churn forward, so the *whole* network visibly
+reorganises rather than only brightening.
 
 The pulse fires on contact rather than after the gesture is classified, so a tap
 never feels late. The hold then engages at 0.4s if the finger hasn't wandered.
@@ -216,17 +219,17 @@ Most of the feel lives in a handful of constants:
 | lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
 | edge crispness | `persistBase` — lattice and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
-| filament thinness | the `34.0` exponent on `pow(abs(cos(...)))` |
-| tap surge | the `tap * 0.09` term added to `cycle` — a tap drives every growth front forward at once, since it has no position to grow from |
+| mycelial line weights | the three `smoothstep` widths — `0.13` cords, `0.075` mid net, `0.055` hyphae. Proportional to each layer's own cell size, not absolute |
+| mycelial scale | the `7.0 / 17.0 / 44.0` frequencies. Roughly 15 coarse cells across a screen reads as a mat; 4 reads as a diagram |
+| how packed the cells look | the `fine * 0.55 * open` weight. Empty cells are what make it read as a net rather than a living mat |
+| cell irregularity | the `* 0.60` domain warp before the cell layers. **Load-bearing** — unwarped Worley gives near-uniform cells and the whole thing reads as crystalline foam |
+| tap surge | `tap * 1.2` inside `churn` — a tap drives the whole network's reorganisation forward, since it has no position to grow from |
 | hold pulse depth | `holdSwing * 0.78` (brightness), `* 0.06` (shape swell), `* 0.09` (hue) |
 | hold pulse rhythm | `Breath.holdPulseSeconds` in `FieldState.swift` |
 | how fast the hold engages / releases | `holdRate` in `FieldState.advance` (asymmetric on purpose), `holdDelay` and `holdSlop` in `FieldView.swift` |
 | ambient motion speed | the `drift * 0.0xx` coefficients in each form function |
 | kaleidoscope symmetry | `segments = 6.0` |
-| how fast a colony grows | `drift * 0.028` in `mycelialField` — one full sweep out and back |
-| how much filaments wander | the `* 0.60` on the fbm3 angle offset. Past ~1.0 the wander drowns the radial structure and it reads as scattered hairs |
-| branch density | `n1 = 3.0 * exp2(lvl)` — the base 3, and the 4-octave clamp above it |
-| how many strands survive | the `smoothstep(0.26, 0.64, lottery)` window |
+| how fast the network reorganises | `drift * 0.05` inside `churn` |
 | breath pacing | `Breath` in `FieldState.swift` — grounded is 11s (resonant breathing, 5.5/min); that number is the point of the mode |
 | how fast grounding eases in | `easeRate` in `FieldState.advance` |
 

@@ -290,110 +290,81 @@ static inline float fbm3(float2 p) {
     return v;
 }
 
-/// One colony: filaments radiating from a point, forking as they advance,
-/// behind a growth front that sweeps outward and then dies back.
+/// Worley / cellular noise — the two nearest site distances (F1, F2). The set
+/// where those are equal is a connected web with three-way junctions, which is
+/// what the coarse structure of a real network actually is.
 ///
-/// The branching comes from the strand count doubling every octave of radius.
-/// Walk outward and each filament splits in two, then those split, and so on —
-/// which is what dichotomous branching actually is. The two counts are
-/// cross-faded across the octave so the fork grows in rather than popping;
-/// same shape as the kaleidoscope's zoom, for the same reason.
-static inline float colony(float2 p, float2 origin, float cycle, float drift,
-                           thread float &tipGlow) {
-    float2 d = p - origin;
-    float r = length(d);
-    float a = atan2(d.y, d.x);
-
-    // Strands wander instead of running dead straight out of the middle. This
-    // is most of the difference between "growth" and "starburst" — but only up
-    // to a point. At 1.35 the wander drowned the radial structure entirely and
-    // the result read as scattered hairs with no organisation at all.
-    a += (fbm3(d * 2.4 + drift * 0.02) - 0.5) * 0.60;
-
-    // Capped at 4 octaves — past that the strands are finer than a pixel and
-    // turn into shimmer.
-    float L = clamp(log2(max(r / 0.05, 1e-3)), 0.0, 4.0);
-    float lvl = floor(L);
-    float f = fract(L);
-    float n1 = 3.0 * exp2(lvl);
-
-    float s1 = pow(abs(cos(a * n1)), 34.0);
-    float s2 = pow(abs(cos(a * n1 * 2.0)), 34.0);
-    float strand = mix(s1, s2, smoothstep(0.15, 0.9, f));
-
-    // Not every branch takes. Killing strands unevenly is the whole difference
-    // between a tidy radial burst and something that looks grown — a uniform
-    // structure reads as manufactured no matter how fine it is.
-    //
-    // Sampled on the unit circle rather than on the raw angle: atan2 jumps by
-    // 2pi across the negative x axis, and any non-integer multiple of `a` turns
-    // that jump into a hard seam straight down the screen. The strand counts
-    // are integers so they wrap cleanly; this did not.
-    //
-    // Crossfaded across the octave for the same reason the strand count is.
-    // Keyed on floor(L) alone it steps at every octave boundary, which chopped
-    // every filament into hard square-ended dashes — the structure was right
-    // and it still read as scratches rather than growth.
-    float2 dir = float2(cos(a), sin(a));
-    float lot1 = valueNoise(dir * (2.0 + lvl * 1.6) + lvl * 13.0);
-    float lot2 = valueNoise(dir * (2.0 + (lvl + 1.0) * 1.6) + (lvl + 1.0) * 13.0);
-    float lottery = mix(lot1, lot2, smoothstep(0.15, 0.9, f));
-    strand *= smoothstep(0.26, 0.64, lottery);
-
-    // The growth front. Filaments exist behind it; the tip is where the colony
-    // is actually working.
-    float front = cycle * 0.95;
-    float behind = smoothstep(front + 0.06, front - 0.20, r);
-    float tip = exp(-pow((r - front) * 13.0, 2.0));
-
-    // Every strand converges at r = 0, so without this the origin is a bright
-    // singularity — a pinch point that reads as a defect rather than a centre.
-    float core = smoothstep(0.0, 0.09, r);
-
-    // Fade in as the colony starts and out as it exhausts, so re-seeding never
-    // pops. Three of these staggered means something is always advancing.
-    float life = smoothstep(0.0, 0.10, cycle) * smoothstep(1.0, 0.72, cycle);
-
-    // Thinning with distance keeps the centre dense and the edges sparse,
-    // which is how a colony actually looks.
-    strand *= life * core * exp(-r * 0.55);
-
-    tipGlow = strand * tip;
-    return strand * behind;
+/// `churn` walks every site along its own small orbit, so the network
+/// reorganises slowly instead of sitting still.
+static inline float2 worley(float2 p, float churn) {
+    float2 n = floor(p);
+    float2 f = fract(p);
+    float f1 = 8.0, f2 = 8.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            float2 g = float2(i, j);
+            float2 h = float2(hash21(n + g), hash21(n + g + 17.3));
+            float2 site = 0.5 + 0.42 * sin(churn + TAU * h);
+            float d = length(g + site - f);
+            if (d < f1)      { f2 = f1; f1 = d; }
+            else if (d < f2) { f2 = d; }
+        }
+    }
+    return float2(f1, f2);
 }
 
-/// Mycelial — a colony growing. Three fronts advance out of phase, so the
-/// screen always has something reaching outward and something dying back.
+/// Mycelial — built against a photograph of a real network, which settled two
+/// arguments at once.
 ///
-/// A tap has no position, so it can't seed growth where your finger went.
-/// Instead it drives every front forward at once: the whole colony surges.
+/// The coarse structure genuinely is cellular: thick bright cords enclosing
+/// irregular regions. A radial branching model was the wrong shape for that,
+/// however good the branching maths was.
+///
+/// But plain Worley was wrong too, in two specific ways. Its cells come out
+/// near-uniform in size, which reads as crystalline foam — so the sampling
+/// space is domain-warped first, and that irregularity is most of what makes
+/// the result look grown rather than manufactured. And a real network is not
+/// one net but three at once: chunky cords, a mid net, and dense fine hyphae
+/// filling every enclosed region. A single scale, however pretty, always reads
+/// as a diagram.
 static inline float mycelialField(float2 p, float drift, float breathWave,
                                   float tap, thread float &detail) {
     p *= 1.0 + breathWave * 0.03;
+    p += float2(drift * 0.006, drift * 0.004);   // the mat creeps
 
-    float web = 0.0;
-    float tips = 0.0;
-    for (int i = 0; i < 3; i++) {
-        float fi = float(i);
-        // Origins drift, so successive generations don't grow from the same
-        // three spots forever.
-        float2 origin = float2(sin(fi * 2.1 + 0.7 + drift * 0.013),
-                               cos(fi * 1.7 + 1.3 + drift * 0.011)) * 0.30;
-        float cycle = fract(drift * 0.028 + fi * 0.3333 + tap * 0.09);
+    // A tap drives the churn forward, so the whole network visibly reorganises
+    // rather than only brightening.
+    float churn = drift * 0.05 + tap * 1.2;
 
-        float tg = 0.0;
-        float s = colony(p, origin, cycle, drift, tg);
-        // max, not sum: overlapping colonies stay legible as separate networks
-        // instead of adding into a bright mush where they cross.
-        web  = max(web, s);
-        tips = max(tips, tg);
-    }
+    float2 wr = float2(fbm3(p * 1.6), fbm3(p * 1.6 + 5.3));
+    float2 q = p + (wr - 0.5) * 0.60;
 
-    detail = clamp(tips * 1.7 + web * 0.3, 0.0, 1.0);
-    // No constant offset: empty space has to land at exactly t = 0, because the
-    // mycelial palettes are built so t = 0 is black. Filaments on dark is the
-    // point of the form; a lifted floor turns the background into mud.
-    return web * 1.7 + tips * 1.0;
+    float2 c1 = worley(q * 7.0,         churn);
+    float2 c2 = worley(q * 17.0 + 3.1,  churn * 1.4);
+    float2 c3 = worley(q * 44.0 + 7.7,  churn * 1.9);
+
+    // Widths are proportional to each layer's own cell size, not absolute, so
+    // the cords stay chunky relative to their cells while the hyphae stay hair
+    // thin relative to theirs. Matching the reference meant going much finer
+    // than felt right by eye: four coarse cells across a screen reads as a
+    // diagram, and roughly fifteen reads as a mat.
+    float cord = 1.0 - smoothstep(0.0, 0.13,  c1.y - c1.x);
+    float mid  = 1.0 - smoothstep(0.0, 0.075, c2.y - c2.x);
+    float fine = 1.0 - smoothstep(0.0, 0.055, c3.y - c3.x);
+
+    // Fine hyphae thin out where a thick cord already runs, so the cords read
+    // as solid strands rather than as fuzz that happens to be denser there.
+    float open = 1.0 - cord;
+
+    // The fine layer carries real weight rather than being a garnish -- in the
+    // reference every enclosed region is packed with hyphae, and cells left
+    // empty are what made the previous pass look like a net instead of a mat.
+    float web = cord + mid * 0.55 * (0.35 + 0.65 * open) + fine * 0.55 * open;
+
+    detail = clamp(cord * 1.2 + mid * 0.4, 0.0, 1.0);
+    // No offset: empty space lands at exactly t = 0, which the mycelial
+    // palettes render as black.
+    return web * 1.25;
 }
 
 // MARK: - Field pass
