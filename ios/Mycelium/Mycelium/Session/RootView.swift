@@ -184,6 +184,20 @@ struct RootView: View {
                 Haptics.shared.startGroundingPulse()
             }
 
+            // Mashing the screen — the case that used to blow the field out.
+            if args.contains("-burst") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(5))
+                    for i in 0..<20 {
+                        let a = Float(i) * 0.7
+                        session.addBloom(x: cos(a) * (0.05 + Float(i) * 0.012),
+                                         y: sin(a) * (0.05 + Float(i) * 0.018),
+                                         strength: 1.0)
+                        try? await Task.sleep(for: .milliseconds(90))
+                    }
+                }
+            }
+
             if args.contains("-blooms") {
                 // Fire after the field has settled so the blooms are mid-life
                 // (young enough to be bright, old enough to have expanded)

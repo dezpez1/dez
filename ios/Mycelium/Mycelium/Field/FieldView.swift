@@ -47,7 +47,7 @@ final class MetalFieldView: MTKView {
 
     /// Blooms while dragging are rate-limited — an unthrottled drag would
     /// blow through the 32-bloom budget in well under a second.
-    private static let bloomInterval: CFTimeInterval = 0.06
+    private static let bloomInterval: CFTimeInterval = 0.10
 
     override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)

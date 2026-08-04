@@ -154,6 +154,7 @@ Most of the feel lives in a handful of constants:
 | overall contrast | `col = col * col * (3 - 2 * col)` in `fieldFragment` — remove it and everything goes washed out again |
 | color richness | the saturation lift in `presentFragment`; the tonemap desaturates as it rolls off and this puts it back |
 | bloom brightness | the `glow * 1.05` term |
+| how much a *flurry* of taps can pile up | the `glow / (1 + glow * 0.55)` and `shock / (1 + ...)` saturation, and the `min(warpLen, 0.30)` cap. Raise the constants to let bursts hit harder; remove them and mashing the screen blows the field out to white |
 | bloom size and travel | `radius = age * 0.30`, and the `* 5.5` ring tightness |
 | how hard a touch hits | `warp * 0.26` (displacement) and `shock * 0.30` (hue push) |
 | how hard a touch hits *per form* | `WARP_ORGANIC` / `WARP_STRUCTURED` and the `GLOW_*` pair — warp is the part that smears geometry, glow is the part that doesn't, so every form except smoke keeps one and not the other |

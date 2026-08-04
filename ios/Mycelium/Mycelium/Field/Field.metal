@@ -380,6 +380,25 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     glow *= glowScale;
     shock *= glowScale;
 
+    // Saturate the sum. One touch should punch; twenty touches must not punch
+    // twenty times as hard. Contributions were adding linearly, so a flurry of
+    // taps stacked into a white blowout and the field went berserk — which is
+    // a property of the *pile*, not of any single bloom, so the fix belongs
+    // here rather than in the per-bloom constants.
+    //
+    // x/(1+kx) asymptotes to 1/k, so the pile has a ceiling it cannot pass.
+    // A single tap lands around two thirds of its old strength and a burst
+    // simply stops getting louder — the burst is what needed fixing, and the
+    // slight softening of one tap is welcome given it was too much anyway.
+    glow  = glow  / (1.0 + glow  * 0.55);
+    shock = shock / (1.0 + shock * 0.85);
+
+    // Displacement is a vector sum, so it needs a magnitude cap rather than a
+    // curve — otherwise several blooms on one side of the screen can shove the
+    // whole field off its own coordinates.
+    float warpLen = length(warp);
+    if (warpLen > 1e-5) warp *= min(warpLen, 0.30) / warpLen;
+
     // ── Form ───────────────────────────────────────────────────────────────
     float detail = 0.0;
     float t;
