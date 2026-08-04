@@ -238,3 +238,25 @@ struct FieldScreen: View {
             }
     }
 }
+
+#Preview("Field") {
+    // Built inside a closure rather than as loose statements: the preview body
+    // is a view builder, and a bare `state.addBloom(...)` there is an
+    // expression of type () sitting where a View is expected.
+    let state: FieldState = {
+        let s = FieldState()
+        // Palettes belong to the form now, so this is an index into
+        // `form.palettes` rather than a global mood. 3 is Filament.
+        s.form = .mycelial
+        s.paletteIndex = 3
+        // The shader ignores tap positions — a tap answers everywhere — but
+        // they're still logged, so these are three taps of varying strength.
+        s.addBloom(x: 0, y: 0, strength: 1.0)
+        s.addBloom(x: -0.22, y: 0.34, strength: 0.85)
+        s.addBloom(x: 0.24, y: -0.30, strength: 0.9)
+        return s
+    }()
+
+    return FieldScreen(state: state) {}
+        .preferredColorScheme(.dark)
+}
