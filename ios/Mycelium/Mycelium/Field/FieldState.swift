@@ -46,7 +46,7 @@ final class FieldState {
     /// Which form is running, and which of that form's own palettes is
     /// selected. Palettes belong to the form now — see Form.swift for why —
     /// so this is an index into `form.palettes`, not a global mood.
-    var form: Form = .smoke {
+    var form: Form = .mycelial {
         didSet { paletteIndex = min(paletteIndex, form.palettes.count - 1) }
     }
     var paletteIndex: Int = 0

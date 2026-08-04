@@ -25,13 +25,12 @@ using namespace metal;
 constant int MAX_BLOOMS = 32;
 constant float TAU = 6.28318530718;
 
-constant int FORM_SMOKE = 0;
+constant int FORM_MYCELIAL = 0;
 constant int FORM_KALEIDOSCOPE = 1;
 constant int FORM_LATTICE = 2;
 constant int FORM_WEAVE = 3;
-constant int FORM_MYCELIAL = 4;
 
-// How much of a tap each form takes. Smoke is a wash and can absorb a lot;
+// How much of a tap each form takes. Mycelial is loose and can absorb a lot;
 // the geometric forms already carry strong structure and a heavy flare washes
 // it out, so they take slightly less.
 constant float GLOW_ORGANIC = 1.0;
@@ -66,11 +65,10 @@ struct Uniforms {
 
 // xy = position in field space, z = birth time, w = strength.
 //
-// Nothing in this shader reads xy any more — a tap answers everywhere at once,
-// so a touch in the corner and a touch dead centre produce an identical field.
-// Position stays in the event log on purpose: it costs nothing, forms that need
-// it are coming (mycelial growth reaches out from where you touched), and that
-// log is the substrate both sync and replay are built on.
+// Nothing in this shader reads xy — a tap answers everywhere at once, so a
+// touch in the corner and a touch dead centre produce an identical field.
+// Position stays in the event log on purpose: it costs nothing, and that log is
+// the substrate both sync and replay are built on.
 typedef float4 Bloom;
 
 struct VertexOut {
@@ -118,7 +116,8 @@ static inline float fbm(float2 p) {
 }
 
 /// Ridged fbm — sharp creases where plain fbm gives soft blobs. This is what
-/// pulls veins and filaments out of the smoke instead of leaving a wash.
+/// pulls creases out of a wash. Currently unused by any shipping form — kept
+/// because it's the obvious tool the moment one needs texture rather than line.
 static inline float ridged(float2 p) {
     float v = 0.0;
     float a = 0.5;
@@ -138,25 +137,6 @@ static inline float3 palette(float t, float4 a, float4 b, float4 c, float4 d) {
 }
 
 // MARK: - Forms
-
-/// Smoke — two-level domain-warped fbm with a ridged overlay for definition.
-/// Returns a scalar the caller maps through the palette.
-static inline float smokeField(float2 p, float drift, float breathWave,
-                               thread float &detail) {
-    float2 q = float2(fbm(p + drift * 0.062),
-                      fbm(p + float2(5.2, 1.3) + drift * 0.053));
-    float2 r = float2(fbm(p + 3.6 * q + float2(1.7, 9.2) + drift * 0.043),
-                      fbm(p + 3.6 * q + float2(8.3, 2.8) + drift * 0.038));
-    float f = fbm(p + 3.6 * r);
-
-    // Ridges ride the same warped space, so the creases follow the flow
-    // instead of sitting on top of it as unrelated texture.
-    detail = ridged(p * 1.7 + 2.2 * r);
-
-    // Widen the range fed to the palette so a single frame spans more of the
-    // color sweep — the old version hovered near one hue and read as flat.
-    return f * 1.35 + length(r) * 0.42 + breathWave * 0.05;
-}
 
 /// One evaluation of the Kali set. Split out because the infinite zoom needs
 /// the same fractal sampled at two magnifications in the same frame.
@@ -302,65 +282,118 @@ static inline float weaveField(float2 p, float drift, float breathWave,
     return band * 0.85 + ribbon * 0.55 + breathWave * 0.04;
 }
 
-/// Worley / cellular noise. Returns the two nearest site distances (F1, F2).
-/// `churn` walks every site along its own little orbit, so the cell boundaries
-/// migrate and the network reorganises instead of sitting still.
-static inline float2 worley(float2 p, float churn) {
-    float2 n = floor(p);
-    float2 f = fract(p);
-    float f1 = 8.0, f2 = 8.0;
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            float2 g = float2(i, j);
-            float2 h = float2(hash21(n + g), hash21(n + g + 17.3));
-            float2 site = 0.5 + 0.42 * sin(churn + TAU * h);
-            float d = length(g + site - f);
-            if (d < f1)      { f2 = f1; f1 = d; }
-            else if (d < f2) { f2 = d; }
-        }
-    }
-    return float2(f1, f2);
+/// Cheap three-octave fbm. The five-octave one is more than the strand
+/// wander needs, and this runs three times per pixel.
+static inline float fbm3(float2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) { v += a * valueNoise(p); p *= 2.03; a *= 0.5; }
+    return v;
 }
 
-/// Mycelial — a living network. The filaments are the *boundaries* between
-/// cells, not the cells: where the two nearest sites are equidistant, F2 - F1
-/// goes to zero, and that set is exactly a connected web with junctions where
-/// three cells meet. Getting branching structure for free out of a distance
-/// comparison is the whole reason this form is cheap enough to run.
+/// One colony: filaments radiating from a point, forking as they advance,
+/// behind a growth front that sweeps outward and then dies back.
 ///
-/// Two octaves — trunks and hyphae — plus a ridged layer for the fine fuzz.
-/// Three octaves looked better and cost 27 cell lookups a pixel, which is too
-/// much with five of these running at once on the picker.
+/// The branching comes from the strand count doubling every octave of radius.
+/// Walk outward and each filament splits in two, then those split, and so on —
+/// which is what dichotomous branching actually is. The two counts are
+/// cross-faded across the octave so the fork grows in rather than popping;
+/// same shape as the kaleidoscope's zoom, for the same reason.
+static inline float colony(float2 p, float2 origin, float cycle, float drift,
+                           thread float &tipGlow) {
+    float2 d = p - origin;
+    float r = length(d);
+    float a = atan2(d.y, d.x);
+
+    // Strands wander instead of running dead straight out of the middle. This
+    // is most of the difference between "growth" and "starburst" — but only up
+    // to a point. At 1.35 the wander drowned the radial structure entirely and
+    // the result read as scattered hairs with no organisation at all.
+    a += (fbm3(d * 2.4 + drift * 0.02) - 0.5) * 0.60;
+
+    // Capped at 4 octaves — past that the strands are finer than a pixel and
+    // turn into shimmer.
+    float L = clamp(log2(max(r / 0.05, 1e-3)), 0.0, 4.0);
+    float lvl = floor(L);
+    float f = fract(L);
+    float n1 = 3.0 * exp2(lvl);
+
+    float s1 = pow(abs(cos(a * n1)), 34.0);
+    float s2 = pow(abs(cos(a * n1 * 2.0)), 34.0);
+    float strand = mix(s1, s2, smoothstep(0.15, 0.9, f));
+
+    // Not every branch takes. Killing strands unevenly is the whole difference
+    // between a tidy radial burst and something that looks grown — a uniform
+    // structure reads as manufactured no matter how fine it is.
+    //
+    // Sampled on the unit circle rather than on the raw angle: atan2 jumps by
+    // 2pi across the negative x axis, and any non-integer multiple of `a` turns
+    // that jump into a hard seam straight down the screen. The strand counts
+    // are integers so they wrap cleanly; this did not.
+    //
+    // Crossfaded across the octave for the same reason the strand count is.
+    // Keyed on floor(L) alone it steps at every octave boundary, which chopped
+    // every filament into hard square-ended dashes — the structure was right
+    // and it still read as scratches rather than growth.
+    float2 dir = float2(cos(a), sin(a));
+    float lot1 = valueNoise(dir * (2.0 + lvl * 1.6) + lvl * 13.0);
+    float lot2 = valueNoise(dir * (2.0 + (lvl + 1.0) * 1.6) + (lvl + 1.0) * 13.0);
+    float lottery = mix(lot1, lot2, smoothstep(0.15, 0.9, f));
+    strand *= smoothstep(0.26, 0.64, lottery);
+
+    // The growth front. Filaments exist behind it; the tip is where the colony
+    // is actually working.
+    float front = cycle * 0.95;
+    float behind = smoothstep(front + 0.06, front - 0.20, r);
+    float tip = exp(-pow((r - front) * 13.0, 2.0));
+
+    // Every strand converges at r = 0, so without this the origin is a bright
+    // singularity — a pinch point that reads as a defect rather than a centre.
+    float core = smoothstep(0.0, 0.09, r);
+
+    // Fade in as the colony starts and out as it exhausts, so re-seeding never
+    // pops. Three of these staggered means something is always advancing.
+    float life = smoothstep(0.0, 0.10, cycle) * smoothstep(1.0, 0.72, cycle);
+
+    // Thinning with distance keeps the centre dense and the edges sparse,
+    // which is how a colony actually looks.
+    strand *= life * core * exp(-r * 0.55);
+
+    tipGlow = strand * tip;
+    return strand * behind;
+}
+
+/// Mycelial — a colony growing. Three fronts advance out of phase, so the
+/// screen always has something reaching outward and something dying back.
 ///
-/// `tap` is the only place any form takes the touch signal directly. A tap
-/// doesn't land anywhere, so it can't seed growth at a point; instead it surges
-/// the entire colony — sites lurch along their orbits and the whole web throws
-/// new branches at once. That is what a touch means on this form.
+/// A tap has no position, so it can't seed growth where your finger went.
+/// Instead it drives every front forward at once: the whole colony surges.
 static inline float mycelialField(float2 p, float drift, float breathWave,
                                   float tap, thread float &detail) {
-    // The colony creeps. Slow enough that you only notice it having happened.
-    p += float2(drift * 0.011, drift * 0.008);
+    p *= 1.0 + breathWave * 0.03;
 
-    // A tap kicks the churn forward, so the network visibly reorganises rather
-    // than merely brightening.
-    float churn = drift * 0.09 + tap * 1.5;
+    float web = 0.0;
+    float tips = 0.0;
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        // Origins drift, so successive generations don't grow from the same
+        // three spots forever.
+        float2 origin = float2(sin(fi * 2.1 + 0.7 + drift * 0.013),
+                               cos(fi * 1.7 + 1.3 + drift * 0.011)) * 0.30;
+        float cycle = fract(drift * 0.028 + fi * 0.3333 + tap * 0.09);
 
-    float2 coarse = worley(p * (2.9 + breathWave * 0.06), churn);
-    float2 fine   = worley(p * 7.4, churn * 1.7 + 11.0);
+        float tg = 0.0;
+        float s = colony(p, origin, cycle, drift, tg);
+        // max, not sum: overlapping colonies stay legible as separate networks
+        // instead of adding into a bright mush where they cross.
+        web  = max(web, s);
+        tips = max(tips, tg);
+    }
 
-    // Thick trunks, thinner hyphae.
-    float trunk = 1.0 - smoothstep(0.0, 0.13, coarse.y - coarse.x);
-    float hypha = 1.0 - smoothstep(0.0, 0.07, fine.y - fine.x);
-
-    // Fuzz along the filaments, so they read as grown rather than drawn.
-    float fuzz = ridged(p * 5.5 + drift * 0.02);
-
-    float web = trunk * 0.85 + hypha * 0.55 * (0.35 + 0.65 * trunk);
-
-    // The bright cores of the network — the part a tap makes surge.
-    detail = clamp(trunk * (0.55 + 0.45 * fuzz) + hypha * 0.35, 0.0, 1.0);
-
-    return web * 0.9 + fuzz * 0.12 + breathWave * 0.04;
+    detail = clamp(tips * 1.7 + web * 0.3, 0.0, 1.0);
+    // No constant offset: empty space has to land at exactly t = 0, because the
+    // mycelial palettes are built so t = 0 is black. Filaments on dark is the
+    // point of the form; a lifted floor turns the background into mud.
+    return web * 1.7 + tips * 1.0;
 }
 
 // MARK: - Field pass
@@ -380,9 +413,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float hold = u.holdParams.x;
     float holdPhase = u.holdParams.y;
 
-    // Smoke is the default form, so it's the one tested for and the one
-    // anything unrecognised falls back to.
-    float glowScale = (form == FORM_SMOKE) ? GLOW_ORGANIC : GLOW_STRUCTURED;
+    float glowScale = (form == FORM_MYCELIAL) ? GLOW_ORGANIC : GLOW_STRUCTURED;
 
     // ── Taps ───────────────────────────────────────────────────────────────
     // Summed with no reference to position, so every tap does the same thing
@@ -439,10 +470,8 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
         t = latticeField(p, drift, breathWave, detail);
     } else if (form == FORM_WEAVE) {
         t = weaveField(p, drift, breathWave, detail);
-    } else if (form == FORM_MYCELIAL) {
-        t = mycelialField(p, drift, breathWave, tap, detail);
     } else {
-        t = smokeField(p, drift, breathWave, detail);
+        t = mycelialField(p, drift, breathWave, tap, detail);
     }
 
     // Both gestures shift hue as well as brightness, so a touch reads as a
@@ -500,7 +529,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // Lattice and weave live or die on hard edges, and heavy feedback is
     // exactly what softens them. They keep much less history than the two
     // forms whose appeal is smear in the first place.
-    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE || form == FORM_MYCELIAL);
+    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE);
     float persistBase = crisp ? 0.34 : 0.66;
     float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72);

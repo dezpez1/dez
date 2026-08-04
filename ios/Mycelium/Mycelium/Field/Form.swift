@@ -4,7 +4,7 @@
 //
 //  Palettes are a property of the form rather than a global list. The two were
 //  orthogonal at first — five shared moods, any form in any palette — and it
-//  didn't survive contact: a full-spectrum sweep that looks alive on smoke goes
+//  didn't survive contact: a full-spectrum sweep that looks alive on a loose form
 //  garish on the kaleidoscope, because that form already carries its own
 //  structure and doesn't need the colour arguing with it. Curating per form
 //  costs a little duplication and buys every combination being one worth
@@ -28,32 +28,34 @@ struct Palette: Equatable, Sendable {
 }
 
 enum Form: Int, CaseIterable, Identifiable, Sendable {
-    case smoke = 0
+    case mycelial = 0
     case kaleidoscope = 1
     case lattice = 2
     case weave = 3
-    case mycelial = 4
     // Next up, per the plan: liquid light.
+    //
+    // `smoke` used to be case 0 — two-level domain-warped fbm. It was the first
+    // form built and the weakest: a wash with no structure, which read as
+    // washed-out no matter how much contrast went on top. Dropped rather than
+    // kept for completeness. It's in the history if it's ever wanted back.
 
     var id: Int { rawValue }
 
     var title: String {
         switch self {
-        case .smoke:        return "Smoke"
+        case .mycelial:     return "Mycelial"
         case .kaleidoscope: return "Kaleidoscope"
         case .lattice:      return "Lattice"
         case .weave:        return "Weave"
-        case .mycelial:     return "Mycelial"
         }
     }
 
     var blurb: String {
         switch self {
-        case .smoke:        return "ink through water"
+        case .mycelial:     return "a colony, reaching"
         case .kaleidoscope: return "fractal, sixfold"
         case .lattice:      return "grids interfering"
         case .weave:        return "one endless ribbon"
-        case .mycelial:     return "a network, growing"
         }
     }
 
@@ -61,24 +63,6 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
     /// palettes onto the form was that every one of them should be good.
     var palettes: [Palette] {
         switch self {
-
-        // Organic and painterly. Smoke is a wash, so it can carry wide,
-        // saturated sweeps without any structure to fight.
-        case .smoke:
-            return [
-                Palette(name: "Drift",
-                        a: SIMD3(0.22, 0.34, 0.44), b: SIMD3(0.28, 0.34, 0.38),
-                        c: SIMD3(1.00, 0.95, 0.60), d: SIMD3(0.00, 0.18, 0.42)),
-                Palette(name: "Ember",
-                        a: SIMD3(0.44, 0.26, 0.18), b: SIMD3(0.40, 0.26, 0.16),
-                        c: SIMD3(0.90, 0.80, 0.55), d: SIMD3(0.02, 0.12, 0.24)),
-                Palette(name: "Bloom",
-                        a: SIMD3(0.38, 0.22, 0.42), b: SIMD3(0.36, 0.24, 0.38),
-                        c: SIMD3(1.00, 0.85, 0.75), d: SIMD3(0.10, 0.32, 0.58)),
-                Palette(name: "Ink",
-                        a: SIMD3(0.16, 0.20, 0.30), b: SIMD3(0.30, 0.32, 0.40),
-                        c: SIMD3(0.50, 0.50, 0.50), d: SIMD3(0.55, 0.60, 0.70)),
-            ]
 
         // Restrained on purpose. The fractal supplies the complexity, so these
         // stay narrow — this is the form where a rainbow reads as noise.
@@ -134,22 +118,24 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
                         c: SIMD3(0.75, 0.65, 0.90), d: SIMD3(0.10, 0.20, 0.55)),
             ]
 
-        // Underground. Pale flesh and dark soil, with one that's just filament
-        // against black.
+        // Built so that t = 0 is exactly black: a == b and d == 0.5 makes
+        // a + b*cos(pi) vanish. Every other form fills the screen with colour,
+        // but this one is filaments against dark, and that only works if empty
+        // space actually renders as empty.
         case .mycelial:
             return [
                 Palette(name: "Spore",
-                        a: SIMD3(0.42, 0.38, 0.30), b: SIMD3(0.32, 0.28, 0.22),
-                        c: SIMD3(0.60, 0.65, 0.50), d: SIMD3(0.10, 0.18, 0.30)),
+                        a: SIMD3(0.42, 0.36, 0.26), b: SIMD3(0.42, 0.36, 0.26),
+                        c: SIMD3(0.50, 0.55, 0.60), d: SIMD3(0.50, 0.50, 0.50)),
                 Palette(name: "Fungal",
-                        a: SIMD3(0.38, 0.26, 0.40), b: SIMD3(0.32, 0.26, 0.34),
-                        c: SIMD3(0.90, 0.80, 0.70), d: SIMD3(0.15, 0.35, 0.60)),
+                        a: SIMD3(0.40, 0.24, 0.42), b: SIMD3(0.40, 0.24, 0.42),
+                        c: SIMD3(0.50, 0.60, 0.55), d: SIMD3(0.50, 0.50, 0.50)),
                 Palette(name: "Deep",
-                        a: SIMD3(0.14, 0.22, 0.32), b: SIMD3(0.26, 0.34, 0.40),
-                        c: SIMD3(0.70, 0.70, 0.60), d: SIMD3(0.40, 0.50, 0.62)),
+                        a: SIMD3(0.18, 0.32, 0.44), b: SIMD3(0.18, 0.32, 0.44),
+                        c: SIMD3(0.55, 0.50, 0.45), d: SIMD3(0.50, 0.50, 0.50)),
                 Palette(name: "Filament",
-                        a: SIMD3(0.24, 0.22, 0.18), b: SIMD3(0.38, 0.36, 0.28),
-                        c: SIMD3(0.50, 0.55, 0.60), d: SIMD3(0.25, 0.28, 0.32)),
+                        a: SIMD3(0.40, 0.37, 0.30), b: SIMD3(0.40, 0.37, 0.30),
+                        c: SIMD3(0.45, 0.50, 0.60), d: SIMD3(0.50, 0.50, 0.50)),
             ]
         }
     }

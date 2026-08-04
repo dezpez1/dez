@@ -38,26 +38,28 @@ Mycelium/
 **Form** is the shape of the visual. Each form carries **its own palettes**.
 
 Those used to be orthogonal — five shared moods, any form in any palette — and
-it didn't survive contact. A full-spectrum sweep that looks alive on smoke goes
-garish on the kaleidoscope, because that form already carries its own structure
-and doesn't need the colour arguing with it. Curating per form costs a little
+it didn't survive contact. A full-spectrum sweep that looks alive on a loose
+form goes garish on the kaleidoscope, because that form already carries its own
+structure and doesn't need the colour arguing with it. Curating per form costs a little
 duplication and buys every combination being one worth shipping.
 
 | Form | |
 |---|---|
-| `smoke` | Two-level domain-warped fbm with a ridged overlay. Ink bleeding through water. |
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
 | `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
 | `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
-| `mycelial` | A living network. The filaments are the *boundaries* between Worley cells — the set where the two nearest sites are equidistant — so branching structure and three-way junctions fall out of a distance comparison for free. |
+| `mycelial` | A colony growing. Filaments radiate from three drifting origins and fork as they advance, behind a growth front that sweeps outward and dies back. |
 
 | Form | Palettes |
 |---|---|
-| `smoke` | Drift · Ember · Bloom · Ink |
 | `kaleidoscope` | Obsidian · Reef · Bone · Vespers |
 | `lattice` | Neon · Chrome · Ultraviolet · Signal |
 | `weave` | Rust · Jade · Ash · Saffron |
 | `mycelial` | Spore · Fungal · Deep · Filament |
+
+The mycelial palettes are built so `t = 0` is exactly black (`a == b`, `d = 0.5`,
+so `a + b·cos(π)` vanishes). Every other form fills the screen with colour; that
+one is filaments against dark, and it only works if empty space renders empty.
 
 **Adding a form** is three small edits: a case in `Form.swift` with its
 palettes, a `somethingField()` function in `Field.metal`, and a branch in
@@ -95,8 +97,8 @@ people who can't read a UI and shouldn't have to hit a target.
 an identical field. Position is still written to the event log — it costs
 nothing and the log is what sync and replay are built on — but no shader reads
 it. On `mycelial`, where a positional touch would have seeded growth at a point,
-a tap instead surges the *whole* colony: every site lurches along its orbit and
-the entire web throws new branches at once.
+a tap instead surges the *whole* colony — every growth front is driven forward
+at once.
 
 The pulse fires on contact rather than after the gesture is classified, so a tap
 never feels late. The hold then engages at 0.4s if the finger hasn't wandered.
@@ -173,7 +175,7 @@ of whole-screen flashes at finger speed is exactly the thing being avoided.
 
 ```bash
 # jump straight into the Field, skipping the picker
-xcrun simctl launch <udid> com.dez.mycelium -field bloom
+xcrun simctl launch <udid> com.dez.mycelium -field filament
 
 # pick a form too — note the palette name has to belong to that form
 xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field reef
@@ -185,7 +187,7 @@ xcrun simctl launch <udid> com.dez.mycelium -form mycelial -field spore -blooms
 xcrun simctl launch <udid> com.dez.mycelium -form weave -field rust -burst
 
 # start already grounded, to compare against normal
-xcrun simctl launch <udid> com.dez.mycelium -field ember -ground
+xcrun simctl launch <udid> com.dez.mycelium -form weave -field ash -ground
 
 # start with the hold pulse engaged (you can't rest a finger on a headless sim)
 xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field bone -hold
@@ -213,16 +215,18 @@ Most of the feel lives in a handful of constants:
 | lattice moiré scale | `split` in `latticeField` — the *relative* angle between the two grids. The interesting range is only about a tenth of a radian wide; outside it you get one screen-sized blob or invisible grain |
 | lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
-| edge crispness | `persistBase` — lattice, weave and mycelial hold far less history than smoke and kaleidoscope, because feedback is exactly what softens a hard edge |
-| mycelial filament thickness | the two `smoothstep` widths in `mycelialField` — `0.13` for trunks, `0.07` for hyphae |
-| how fast the network reorganises | `churn` in `mycelialField`. The `tap * 1.5` term is what makes a touch surge the colony rather than only brighten it |
-| mycelial cost | two Worley octaves, 18 cell lookups per pixel. Three octaves looked better and cost 27, which is too much with five live tiles running on the picker |
+| edge crispness | `persistBase` — lattice and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
+| filament thinness | the `34.0` exponent on `pow(abs(cos(...)))` |
+| tap surge | the `tap * 0.09` term added to `cycle` — a tap drives every growth front forward at once, since it has no position to grow from |
 | hold pulse depth | `holdSwing * 0.78` (brightness), `* 0.06` (shape swell), `* 0.09` (hue) |
 | hold pulse rhythm | `Breath.holdPulseSeconds` in `FieldState.swift` |
 | how fast the hold engages / releases | `holdRate` in `FieldState.advance` (asymmetric on purpose), `holdDelay` and `holdSlop` in `FieldView.swift` |
-| ambient motion speed | the `drift * 0.0xx` coefficients in `smokeField`, `rot` in `kaleidoscopeField` |
+| ambient motion speed | the `drift * 0.0xx` coefficients in each form function |
 | kaleidoscope symmetry | `segments = 6.0` |
-| smoke definition | `ridged()` and the `detail * 0.42` mix — this is what pulls veins out of the wash |
+| how fast a colony grows | `drift * 0.028` in `mycelialField` — one full sweep out and back |
+| how much filaments wander | the `* 0.60` on the fbm3 angle offset. Past ~1.0 the wander drowns the radial structure and it reads as scattered hairs |
+| branch density | `n1 = 3.0 * exp2(lvl)` — the base 3, and the 4-octave clamp above it |
+| how many strands survive | the `smoothstep(0.26, 0.64, lottery)` window |
 | breath pacing | `Breath` in `FieldState.swift` — grounded is 11s (resonant breathing, 5.5/min); that number is the point of the mode |
 | how fast grounding eases in | `easeRate` in `FieldState.advance` |
 
