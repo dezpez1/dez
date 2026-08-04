@@ -30,19 +30,22 @@ constant int FORM_KALEIDOSCOPE = 1;
 constant int FORM_LATTICE = 2;
 constant int FORM_WEAVE = 3;
 
-// A touch does two separable things: it shoves the field around in space
-// (warp), and it flares light and color (glow). Those want different amounts
-// per form.
-//
-// Smoke is a wash with no structure to protect, so it takes both at full.
-// Every other form is built on geometry — symmetry, a lattice, a weave — and
-// warping smears exactly the thing that makes it worth looking at. So for those
-// the shove drops to a fifth while the light and colour stay nearly full, which
-// keeps a tap reading as "the pattern pulsed" rather than "the pattern bent."
-constant float WARP_ORGANIC = 1.0;
-constant float WARP_STRUCTURED = 0.20;
+// How much of a tap each form takes. Smoke is a wash and can absorb a lot;
+// the geometric forms already carry strong structure and a heavy flare washes
+// it out, so they take slightly less.
 constant float GLOW_ORGANIC = 1.0;
 constant float GLOW_STRUCTURED = 0.85;
+
+/// Struck-bell envelope for a tap: rise, then a long fall. Returns 0 at age 0,
+/// peaks at ~0.26s, and is normalised so one tap at full strength peaks at 1.
+///
+/// The rise is deliberately not instant. A tap now brightens the entire screen
+/// rather than one spot, and instant global steps at a tapping cadence land
+/// squarely in the photosensitivity band — a soft attack keeps the modulation
+/// smooth no matter how hard the screen gets hit.
+static inline float tapEnvelope(float age) {
+    return (exp(-age * 2.2) - exp(-age * 6.0)) * 2.82;
+}
 
 /// Octaves per second of kaleidoscope zoom. One octave = the view has doubled
 /// in magnification. 0.10 is a doubling every 10s — unmistakably moving without
@@ -60,7 +63,13 @@ struct Uniforms {
     float4 palD;        //                    phase
 };
 
-// xy = position in field space, z = birth time, w = strength
+// xy = position in field space, z = birth time, w = strength.
+//
+// Nothing in this shader reads xy any more — a tap answers everywhere at once,
+// so a touch in the corner and a touch dead centre produce an identical field.
+// Position stays in the event log on purpose: it costs nothing, forms that need
+// it are coming (mycelial growth reaches out from where you touched), and that
+// log is the substrate both sync and replay are built on.
 typedef float4 Bloom;
 
 struct VertexOut {
@@ -131,17 +140,17 @@ static inline float3 palette(float t, float4 a, float4 b, float4 c, float4 d) {
 
 /// Smoke — two-level domain-warped fbm with a ridged overlay for definition.
 /// Returns a scalar the caller maps through the palette.
-static inline float smokeField(float2 p, float drift, float breathWave, float2 warp,
+static inline float smokeField(float2 p, float drift, float breathWave,
                                thread float &detail) {
     float2 q = float2(fbm(p + drift * 0.062),
                       fbm(p + float2(5.2, 1.3) + drift * 0.053));
     float2 r = float2(fbm(p + 3.6 * q + float2(1.7, 9.2) + drift * 0.043),
                       fbm(p + 3.6 * q + float2(8.3, 2.8) + drift * 0.038));
-    float f = fbm(p + 3.6 * r + warp * 3.0);
+    float f = fbm(p + 3.6 * r);
 
     // Ridges ride the same warped space, so the creases follow the flow
     // instead of sitting on top of it as unrelated texture.
-    detail = ridged(p * 1.7 + 2.2 * r + warp * 2.0);
+    detail = ridged(p * 1.7 + 2.2 * r);
 
     // Widen the range fed to the palette so a single frame spans more of the
     // color sweep — the old version hovered near one hue and read as flat.
@@ -165,7 +174,7 @@ static inline void kaliLayer(float2 z, float2 c,
 /// falling forever into itself. The orbit traps supply self-similar detail at
 /// every scale, which is the thing that rewards looking closer.
 static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
-                                      float2 warp, thread float &detail) {
+                                      thread float &detail) {
     // Fold into one wedge and mirror. Doing this before the fractal means the
     // detail is symmetric rather than symmetry being painted over noise.
     const float segments = 6.0;
@@ -178,8 +187,6 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
     ang = fmod(ang, seg);
     ang = abs(ang - seg * 0.5);
     float2 q = float2(cos(ang), sin(ang)) * rad;
-
-    q += warp * 0.8;                       // touches distort the symmetry
 
     float rot = drift * 0.026;             // very slow turn
     float cs = cos(rot), sn = sin(rot);
@@ -222,9 +229,7 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
 /// interference between them, which is why a fraction of a degree of drift
 /// reorganises the entire screen. Pure geometry, no noise anywhere.
 static inline float latticeField(float2 p, float drift, float breathWave,
-                                 float2 warp, thread float &detail) {
-    p += warp * 1.4;
-
+                                 thread float &detail) {
     // Fine enough that the grid itself reads as a grid. The first version used
     // scale 9, which put barely one period on screen — the whole display became
     // a single soft blob with no lattice visible anywhere.
@@ -267,12 +272,12 @@ static inline float latticeField(float2 p, float drift, float breathWave,
 /// is one continuous woven maze that never repeats and never breaks. The grid
 /// drifts and turns so the weave reorganises without ever cutting.
 static inline float weaveField(float2 p, float drift, float breathWave,
-                               float2 warp, thread float &detail) {
+                               thread float &detail) {
     float rot = drift * 0.015;
     float cs = cos(rot), sn = sin(rot);
     float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
 
-    q = q * (7.5 + breathWave * 0.25) + warp * 2.2;
+    q = q * (7.5 + breathWave * 0.25);
     q += float2(drift * 0.035, drift * 0.021);   // slow travel across the weave
 
     float2 cell = floor(q);
@@ -315,9 +320,23 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // Smoke is the default form, so it's the one tested for and the one
     // anything unrecognised falls back to.
-    bool organic = (form == FORM_SMOKE);
-    float warpScale = organic ? WARP_ORGANIC : WARP_STRUCTURED;
-    float glowScale = organic ? GLOW_ORGANIC : GLOW_STRUCTURED;
+    float glowScale = (form == FORM_SMOKE) ? GLOW_ORGANIC : GLOW_STRUCTURED;
+
+    // ── Taps ───────────────────────────────────────────────────────────────
+    // Summed with no reference to position, so every tap does the same thing
+    // to the whole field. Computed up here because the swell feeds the zoom.
+    float tap = 0.0;
+    for (int i = 0; i < MAX_BLOOMS; i++) {
+        if (i >= bloomCount) break;
+        Bloom b = blooms[i];
+        tap += tapEnvelope(max(time - b.z, 0.0)) * b.w;
+    }
+    tap *= glowScale;
+
+    // Saturate the pile. x/(1+kx) asymptotes to 1/k, so one tap comes through
+    // near full and a flurry simply stops getting louder instead of stacking
+    // linearly into a white blowout.
+    tap = tap / (1.0 + tap * 0.55);
 
     // Hold-to-pulse: glow, dim, glow, dim, for as long as a finger rests.
     // Starts at the TOP of the swing so pressing brightens immediately — the
@@ -339,81 +358,33 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // field's own motion toward stillness.
     float breathWave = sin(breath * TAU);
     float zoom = 1.0 + breathWave * mix(0.035, 0.075, grounding);
-    // The hold pulse swells the shapes as it brightens — smaller p magnifies,
-    // so this subtracts. Shape and light moving together is what sells it as
-    // one pulse rather than a brightness effect laid over a still picture.
-    zoom -= holdSwing * 0.06;
+    // Hold and tap both swell the shapes as they brighten — smaller p
+    // magnifies, so these subtract. Shape and light moving together is what
+    // sells either as one pulse rather than a brightness effect laid over a
+    // still picture.
+    zoom -= holdSwing * 0.06 + tap * 0.045;
     p *= zoom;
 
     // Grounding slows drift to a near-stop rather than freezing hard.
     float drift = (time + seed * 7.0) * mix(1.0, 0.22, grounding);
 
-    // ── Blooms ─────────────────────────────────────────────────────────────
-    // A touch does three things: pushes the field outward, throws an expanding
-    // ring, and leaves a bright core. Deliberately dramatic — the input is
-    // supposed to feel like it did something.
-    float2 warp = float2(0.0);
-    float glow = 0.0;
-    float shock = 0.0;
-    for (int i = 0; i < MAX_BLOOMS; i++) {
-        if (i >= bloomCount) break;
-        Bloom b = blooms[i];
-        float age = max(time - b.z, 0.0);
-        float2 d = p - b.xy;
-        float dist = length(d);
-
-        float radius = age * 0.30;                         // travels faster now
-        float ring = exp(-pow((dist - radius) * 5.5, 2.0));
-        float decay = exp(-age * 0.26);                    // long, gentle tail
-        float core = exp(-dist * dist * 42.0) * exp(-age * 1.0);
-
-        // Radial displacement, strongest right at the wavefront.
-        warp += normalize(d + 1e-6) * ring * decay * 0.26 * b.w;
-        glow += (ring * decay * 1.15 + core * 1.4) * b.w;
-        // Pushes the palette hue as the wave passes, so a touch reads as a
-        // color event and not only a brightness one.
-        shock += ring * decay * b.w;
-    }
-
-    // Per-form weighting, applied once rather than inside the loop.
-    warp *= warpScale;
-    glow *= glowScale;
-    shock *= glowScale;
-
-    // Saturate the sum. One touch should punch; twenty touches must not punch
-    // twenty times as hard. Contributions were adding linearly, so a flurry of
-    // taps stacked into a white blowout and the field went berserk — which is
-    // a property of the *pile*, not of any single bloom, so the fix belongs
-    // here rather than in the per-bloom constants.
-    //
-    // x/(1+kx) asymptotes to 1/k, so the pile has a ceiling it cannot pass.
-    // A single tap lands around two thirds of its old strength and a burst
-    // simply stops getting louder — the burst is what needed fixing, and the
-    // slight softening of one tap is welcome given it was too much anyway.
-    glow  = glow  / (1.0 + glow  * 0.55);
-    shock = shock / (1.0 + shock * 0.85);
-
-    // Displacement is a vector sum, so it needs a magnitude cap rather than a
-    // curve — otherwise several blooms on one side of the screen can shove the
-    // whole field off its own coordinates.
-    float warpLen = length(warp);
-    if (warpLen > 1e-5) warp *= min(warpLen, 0.30) / warpLen;
-
     // ── Form ───────────────────────────────────────────────────────────────
     float detail = 0.0;
     float t;
     if (form == FORM_KALEIDOSCOPE) {
-        t = kaleidoscopeField(p, drift, breathWave, warp, detail);
+        t = kaleidoscopeField(p, drift, breathWave, detail);
     } else if (form == FORM_LATTICE) {
-        t = latticeField(p, drift, breathWave, warp, detail);
+        t = latticeField(p, drift, breathWave, detail);
     } else if (form == FORM_WEAVE) {
-        t = weaveField(p, drift, breathWave, warp, detail);
+        t = weaveField(p, drift, breathWave, detail);
     } else {
-        t = smokeField(p, drift, breathWave, warp, detail);
+        t = smokeField(p, drift, breathWave, detail);
     }
 
-    t += shock * 0.30;
-    t += holdSwing * 0.09;   // the hold shifts hue too, not just brightness
+    // Both gestures shift hue as well as brightness, so a touch reads as a
+    // colour event and not only a lighting one.
+    t += tap * 0.22;
+    t += holdSwing * 0.09;
 
     float3 col = palette(t, u.palA, u.palB, u.palC, u.palD);
 
@@ -426,11 +397,12 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // out; this pushes darks down and lets the bright structure separate.
     col = col * col * (3.0 - 2.0 * col);
 
-    // Blooms brighten toward the warm end of the palette.
-    col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD) * glow * 1.05;
+    // A tap lifts the whole field toward the warm end of the palette. No
+    // falloff, no centre — the same everywhere on screen, by design.
+    col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD) * tap * 0.95;
 
     // Hold pulse: the whole field swells with light and falls back. Applied
-    // after the blooms so a tap still punches through while you're holding.
+    // after the tap so a tap still punches through while you're holding.
     col *= 1.0 + holdSwing * 0.78;
 
     // Soft vignette keeps the eye centered and hides edge artifacts.

@@ -7,17 +7,19 @@
 //  requires reading, and the grounding affordance is reachable from anywhere
 //  on screen without navigating.
 //
-//    1 finger   tap          → one pulse of shape and colour
+//    1 finger   tap          → one pulse of shape and colour, everywhere at
+//                              once — where you touch makes no difference
 //    1 finger   press + rest → the field glows and dims in time, for as long
 //                              as you stay put
-//    1 finger   drag         → paints; moving cancels the hold
+//    1 finger   drag         → nothing; moving is only what cancels the hold
 //    2 fingers  press + hold → Ground Me (engages after a short delay so a
 //                              stray two-finger touch can't flip it)
 //    3 fingers  tap          → leave the session (deliberate, hard to hit
 //                              by accident, but not buried in a menu)
 //
-//  Tap, rest, and drag are the same gesture told apart by what happens after
-//  it lands, so there is nothing to learn and nothing to aim at.
+//  Tap and rest are the same gesture told apart by what happens after it
+//  lands, so there is nothing to learn — and since neither one cares where it
+//  lands, there is nothing to aim at either.
 //
 
 import SwiftUI
@@ -45,9 +47,12 @@ final class MetalFieldView: MTKView {
     /// this gets used by people who are not steady, which is the point.
     private static let holdSlop: CGFloat = 24
 
-    /// Blooms while dragging are rate-limited — an unthrottled drag would
-    /// blow through the 32-bloom budget in well under a second.
-    private static let bloomInterval: CFTimeInterval = 0.10
+    /// Minimum spacing between taps. A tap now brightens the whole screen, so
+    /// this is a safety limit as much as a budget one: unthrottled taps are
+    /// global luminance modulation at whatever rate a finger can manage, and
+    /// that belongs nowhere near the photosensitivity band. At 0.22s the
+    /// envelopes overlap heavily and sum to a smooth swell rather than flicker.
+    private static let tapInterval: CFTimeInterval = 0.22
 
     override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
@@ -70,9 +75,12 @@ final class MetalFieldView: MTKView {
         return ((u - 0.5) * aspect, v - 0.5)
     }
 
-    private func addBloom(at p: CGPoint, strength: Float) {
+    /// Position is still recorded — the event log is what sync and replay are
+    /// built on, and forms that use it are coming — but the shader currently
+    /// answers the same way wherever the finger lands.
+    private func addTap(at p: CGPoint, strength: Float) {
         let now = CACurrentMediaTime()
-        guard now - lastBloomAt >= Self.bloomInterval else { return }
+        guard now - lastBloomAt >= Self.tapInterval else { return }
         lastBloomAt = now
         let (x, y) = fieldPoint(p)
         state?.addBloom(x: x, y: y, strength: strength)
@@ -136,7 +144,7 @@ final class MetalFieldView: MTKView {
             let p = t.location(in: self)
             // The pulse lands on contact. Waiting for the gesture to be
             // classified first would make every tap feel late.
-            addBloom(at: p, strength: 1.0)
+            addTap(at: p, strength: 1.0)
             armHold(at: p)
         } else {
             // A second finger means grounding, not holding.
@@ -153,18 +161,18 @@ final class MetalFieldView: MTKView {
         let p = t.location(in: self)
 
         // Wandering past the slop means this is a drag, not a rest. Drop the
-        // hold — engaged or merely pending — and go back to painting.
+        // hold, whether it was engaged or still only pending.
         if let origin = holdOrigin {
             if hypot(p.x - origin.x, p.y - origin.y) > Self.holdSlop {
                 cancelHold()
-            } else {
-                // Still resting. Don't paint over the pulse.
-                return
             }
         }
 
-        // Softer than a tap so dragging paints rather than punches.
-        addBloom(at: p, strength: 0.65)
+        // Dragging no longer emits anything. It used to paint a trail of blooms,
+        // which only meant something when a touch was a place on the screen —
+        // now that a tap answers everywhere, a drag would just be a stream of
+        // whole-screen flashes at whatever rate a finger moves. Moving is now
+        // purely the signal that this isn't a hold.
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
