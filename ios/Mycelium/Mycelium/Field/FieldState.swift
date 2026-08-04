@@ -85,6 +85,11 @@ enum Breath {
     /// enough that the field is visibly going somewhere, slow enough that it
     /// never asks for attention.
     static let ambientCycleSeconds: Float = 13.0
+
+    /// Hold-to-pulse rhythm: glow, dim, glow, dim. Deliberately faster than
+    /// either breath — this one is an answer to your finger, so it has to read
+    /// as caused rather than as the field's own idling.
+    static let holdPulseSeconds: Float = 2.2
 }
 
 @MainActor
@@ -107,6 +112,13 @@ final class FieldState {
     private(set) var breathPhase: Float = 0
     private(set) var elapsed: Float = 0
 
+    /// Hold-to-pulse. `hold` is the eased amount (0 = released, 1 = fully
+    /// engaged). The phase resets on engage so the rhythm always starts on the
+    /// rise — coming in mid-dim would read as the field ignoring you.
+    private(set) var hold: Float = 0
+    private(set) var holdTarget: Float = 0
+    private(set) var holdPhase: Float = 0
+
     /// Stable per-session seed so the same session looks like itself.
     let seed: Float = Float.random(in: 0..<100)
 
@@ -125,6 +137,18 @@ final class FieldState {
         breathPhase += deltaTime / cycle
         if breathPhase > 1 { breathPhase -= floor(breathPhase) }
 
+        // Hold engages faster than it releases. Snapping on is what makes it
+        // feel caused; letting go slowly is what keeps release from being a
+        // cut. Asymmetric on purpose.
+        let holdRate: Float = holdTarget > hold ? 3.0 : 1.2
+        if abs(holdTarget - hold) > 0.001 {
+            hold += (holdTarget - hold) * min(deltaTime * holdRate, 1)
+        } else {
+            hold = holdTarget
+        }
+        holdPhase += deltaTime / Breath.holdPulseSeconds
+        if holdPhase > 1 { holdPhase -= floor(holdPhase) }
+
         // Retire blooms once their contribution is imperceptible. The shader
         // decays at exp(-age * 0.28), so ~25s is comfortably past visible.
         blooms.removeAll { elapsed - $0.birth > 25 }
@@ -141,6 +165,13 @@ final class FieldState {
 
     func setGrounding(_ active: Bool) {
         groundingTarget = active ? 1 : 0
+    }
+
+    /// Engaged by a stationary finger. Starts the field glowing and dimming in
+    /// time, and keeps it up until the finger lifts.
+    func setHolding(_ active: Bool) {
+        if active && holdTarget == 0 { holdPhase = 0 }
+        holdTarget = active ? 1 : 0
     }
 
     /// Where in the breath cycle we are, as a 0…1 "fullness" value.

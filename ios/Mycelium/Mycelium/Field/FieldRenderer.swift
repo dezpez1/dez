@@ -18,6 +18,7 @@ import simd
 private struct Uniforms {
     var resTime: SIMD4<Float>
     var groundCount: SIMD4<Float>
+    var holdParams: SIMD4<Float>
     var palA: SIMD4<Float>
     var palB: SIMD4<Float>
     var palC: SIMD4<Float>
@@ -180,6 +181,7 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                                    Float(state.blooms.count),
                                    state.seed,
                                    Float(state.form.rawValue)),
+                holdParams: SIMD4(state.hold, state.holdPhase, 0, 0),
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),

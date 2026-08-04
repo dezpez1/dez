@@ -7,11 +7,17 @@
 //  requires reading, and the grounding affordance is reachable from anywhere
 //  on screen without navigating.
 //
-//    1 finger   tap or drag  → bloom
+//    1 finger   tap          → one pulse of shape and colour
+//    1 finger   press + rest → the field glows and dims in time, for as long
+//                              as you stay put
+//    1 finger   drag         → paints; moving cancels the hold
 //    2 fingers  press + hold → Ground Me (engages after a short delay so a
 //                              stray two-finger touch can't flip it)
 //    3 fingers  tap          → leave the session (deliberate, hard to hit
 //                              by accident, but not buried in a menu)
+//
+//  Tap, rest, and drag are the same gesture told apart by what happens after
+//  it lands, so there is nothing to learn and nothing to aim at.
 //
 
 import SwiftUI
@@ -27,6 +33,17 @@ final class MetalFieldView: MTKView {
     private var groundingWorkItem: DispatchWorkItem?
     private static let groundingHoldDelay: TimeInterval = 0.35
     private var lastBloomAt: CFTimeInterval = 0
+
+    private var holdWorkItem: DispatchWorkItem?
+    private var holdOrigin: CGPoint?
+
+    /// Long enough that a tap is unambiguously a tap, short enough that
+    /// resting a finger doesn't feel like waiting for permission.
+    private static let holdDelay: TimeInterval = 0.40
+
+    /// How far a finger may wander and still count as resting. Generous —
+    /// this gets used by people who are not steady, which is the point.
+    private static let holdSlop: CGFloat = 24
 
     /// Blooms while dragging are rate-limited — an unthrottled drag would
     /// blow through the 32-bloom budget in well under a second.
@@ -61,6 +78,25 @@ final class MetalFieldView: MTKView {
         state?.addBloom(x: x, y: y, strength: strength)
     }
 
+    /// Arm the hold. Fires only if the finger is still down and still roughly
+    /// where it started.
+    private func armHold(at p: CGPoint) {
+        cancelHold()
+        holdOrigin = p
+        let work = DispatchWorkItem { [weak self] in
+            self?.state?.setHolding(true)
+        }
+        holdWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdDelay, execute: work)
+    }
+
+    private func cancelHold() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        holdOrigin = nil
+        state?.setHolding(false)
+    }
+
     private func updateGrounding(activeTouches: Int) {
         if activeTouches >= 2 {
             guard groundingWorkItem == nil else { return }
@@ -88,6 +124,7 @@ final class MetalFieldView: MTKView {
             groundingWorkItem?.cancel()
             groundingWorkItem = nil
             state?.setGrounding(false)
+            cancelHold()
             Haptics.shared.stopGroundingPulse()
             onExit?()
             return
@@ -96,7 +133,14 @@ final class MetalFieldView: MTKView {
         updateGrounding(activeTouches: active)
 
         if active == 1, let t = touches.first {
-            addBloom(at: t.location(in: self), strength: 1.0)
+            let p = t.location(in: self)
+            // The pulse lands on contact. Waiting for the gesture to be
+            // classified first would make every tap feel late.
+            addBloom(at: p, strength: 1.0)
+            armHold(at: p)
+        } else {
+            // A second finger means grounding, not holding.
+            cancelHold()
         }
     }
 
@@ -104,9 +148,23 @@ final class MetalFieldView: MTKView {
         let active = event?.allTouches?.filter {
             $0.phase != .ended && $0.phase != .cancelled
         }.count ?? touches.count
-        guard active == 1, let t = touches.first else { return }
+        guard active == 1, let t = touches.first else { cancelHold(); return }
+
+        let p = t.location(in: self)
+
+        // Wandering past the slop means this is a drag, not a rest. Drop the
+        // hold — engaged or merely pending — and go back to painting.
+        if let origin = holdOrigin {
+            if hypot(p.x - origin.x, p.y - origin.y) > Self.holdSlop {
+                cancelHold()
+            } else {
+                // Still resting. Don't paint over the pulse.
+                return
+            }
+        }
+
         // Softer than a tap so dragging paints rather than punches.
-        addBloom(at: t.location(in: self), strength: 0.65)
+        addBloom(at: p, strength: 0.65)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -114,10 +172,12 @@ final class MetalFieldView: MTKView {
             $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
         updateGrounding(activeTouches: remaining)
+        if remaining == 0 { cancelHold() }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         updateGrounding(activeTouches: 0)
+        cancelHold()
     }
 }
 

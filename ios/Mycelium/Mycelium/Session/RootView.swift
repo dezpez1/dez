@@ -174,6 +174,11 @@ struct RootView: View {
             }
             inSession = true
 
+            // A headless simulator can't rest a finger on the glass either.
+            if args.contains("-hold") {
+                session.setHolding(true)
+            }
+
             if args.contains("-ground") {
                 session.setGrounding(true)
                 Haptics.shared.startGroundingPulse()

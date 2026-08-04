@@ -28,10 +28,29 @@ constant float TAU = 6.28318530718;
 constant int FORM_SMOKE = 0;
 constant int FORM_KALEIDOSCOPE = 1;
 
+// A touch does two separable things: it shoves the field around in space
+// (warp), and it flares light and color (glow). Those want different amounts
+// per form.
+//
+// Smoke is a wash with no structure to protect, so it takes both at full.
+// The kaleidoscope's whole point is its symmetry, and warping smears it — so
+// the shove drops to a fifth while the light and color stay nearly full. That
+// keeps a tap reading as "the pattern pulsed" rather than "the pattern bent."
+constant float WARP_SMOKE = 1.0;
+constant float WARP_KALEIDOSCOPE = 0.20;
+constant float GLOW_SMOKE = 1.0;
+constant float GLOW_KALEIDOSCOPE = 0.85;
+
+/// Octaves per second of kaleidoscope zoom. One octave = the view has doubled
+/// in magnification. ~0.055 is a doubling every 18s: clearly moving, never
+/// hurried. Raising this past ~0.12 starts to feel like falling.
+constant float ZOOM_RATE = 0.055;
+
 // Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
 struct Uniforms {
     float4 resTime;     // xy = resolution px, z = time s, w = breath phase 0..1
     float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = form
+    float4 holdParams;  // x = hold amount 0..1, y = hold phase 0..1, zw spare
     float4 palA;        // IQ cosine palette: bias
     float4 palB;        //                    amplitude
     float4 palC;        //                    frequency
@@ -126,9 +145,22 @@ static inline float smokeField(float2 p, float drift, float breathWave, float2 w
     return f * 1.35 + length(r) * 0.42 + breathWave * 0.05;
 }
 
-/// Kaleidoscope — sixfold mirror symmetry over a Kali-set inversion fractal.
-/// The orbit traps supply self-similar detail at every scale, which is the
-/// thing that rewards looking closer.
+/// One evaluation of the Kali set. Split out because the infinite zoom needs
+/// the same fractal sampled at two magnifications in the same frame.
+static inline void kaliLayer(float2 z, float2 c,
+                             thread float &trapRadial, thread float &trapAxis) {
+    trapRadial = 1e9;
+    trapAxis = 1e9;
+    for (int i = 0; i < 9; i++) {
+        z = abs(z) / max(dot(z, z), 1e-5) - c;
+        trapRadial = min(trapRadial, length(z));
+        trapAxis = min(trapAxis, abs(z.x));
+    }
+}
+
+/// Kaleidoscope — sixfold mirror symmetry over a Kali-set inversion fractal,
+/// falling forever into itself. The orbit traps supply self-similar detail at
+/// every scale, which is the thing that rewards looking closer.
 static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
                                       float2 warp, thread float &detail) {
     // Fold into one wedge and mirror. Doing this before the fractal means the
@@ -149,20 +181,34 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
     float rot = drift * 0.026;             // very slow turn
     float cs = cos(rot), sn = sin(rot);
     q = float2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
-    q *= 1.35 + breathWave * 0.10;         // breath zooms the fractal
+    q *= 1.35 + breathWave * 0.10;         // breath still zooms on top
 
     // Kali set: z = |z| / dot(z,z) - c. The constant drifts slowly, which
     // makes the whole structure evolve rather than sit still.
-    float2 z = q;
     float2 c = float2(0.72 + 0.055 * sin(drift * 0.021),
                       0.51 + 0.055 * cos(drift * 0.017));
-    float trapRadial = 1e9;
-    float trapAxis = 1e9;
-    for (int i = 0; i < 9; i++) {
-        z = abs(z) / max(dot(z, z), 1e-5) - c;
-        trapRadial = min(trapRadial, length(z));
-        trapAxis = min(trapAxis, abs(z.x));
-    }
+
+    // ── Infinite zoom ──────────────────────────────────────────────────────
+    // Two copies of the fractal exactly one octave apart, cross-faded. By the
+    // time the near layer has magnified 2x it sits precisely where the far
+    // layer began, so at the wrap the two are identical and the handoff is
+    // invisible — the fall never lands and never repeats a frame.
+    //
+    // The seam-free property comes from the octave spacing alone, not from the
+    // fractal being self-similar. The Kali set isn't, exactly, which is the
+    // good part: you keep arriving somewhere new that still looks like home.
+    float k = fract(drift * ZOOM_RATE);
+
+    float radialNear, axisNear, radialFar, axisFar;
+    kaliLayer(q * exp2(-k),       c, radialNear, axisNear);
+    kaliLayer(q * exp2(1.0 - k),  c, radialFar,  axisFar);
+
+    // Linear, not smoothstep. Both are seamless at the wrap, but smoothstep
+    // holds on one layer and then dissolves fast through the middle, and that
+    // dissolve reads as an event. Linear spreads the double-exposure evenly so
+    // nothing ever "happens" — which is the point of an endless zoom.
+    float trapRadial = mix(radialNear, radialFar, k);
+    float trapAxis   = mix(axisNear,   axisFar,   k);
 
     detail = 1.0 - clamp(trapAxis * 5.5, 0.0, 1.0);   // bright filament cores
     return trapRadial * 1.45 + trapAxis * 0.85 + breathWave * 0.04;
@@ -182,6 +228,25 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     int bloomCount = int(u.groundCount.y);
     float seed = u.groundCount.z;
     int form = int(u.groundCount.w);
+    float hold = u.holdParams.x;
+    float holdPhase = u.holdParams.y;
+
+    // Smoke is the default form, so it's the one tested for and the one
+    // anything unrecognised falls back to.
+    float warpScale = (form == FORM_SMOKE) ? WARP_SMOKE : WARP_KALEIDOSCOPE;
+    float glowScale = (form == FORM_SMOKE) ? GLOW_SMOKE : GLOW_KALEIDOSCOPE;
+
+    // Hold-to-pulse: glow, dim, glow, dim, for as long as a finger rests.
+    // Starts at the TOP of the swing so pressing brightens immediately — the
+    // eased `hold` ramp means that's a swell, not a pop. Beginning on the dim
+    // half would read as the field ignoring you for a second.
+    // Cosine, never a step: the no-strobe rule holds here like everywhere else.
+    float holdWave = (1.0 + cos(holdPhase * TAU)) * 0.5;   // 1 → 0 → 1, smooth
+    // Offset below centre so the swing dims genuinely below baseline instead
+    // of only ever adding light. 0.30 rather than a symmetric 0.5 because the
+    // present pass rolls off highlights but not shadows — an even split
+    // measures as a much deeper dim than glow.
+    float holdSwing = hold * (holdWave - 0.30);
 
     // Aspect-corrected field space, origin at center.
     float2 uv = in.uv;
@@ -191,6 +256,10 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // field's own motion toward stillness.
     float breathWave = sin(breath * TAU);
     float zoom = 1.0 + breathWave * mix(0.035, 0.075, grounding);
+    // The hold pulse swells the shapes as it brightens — smaller p magnifies,
+    // so this subtracts. Shape and light moving together is what sells it as
+    // one pulse rather than a brightness effect laid over a still picture.
+    zoom -= holdSwing * 0.06;
     p *= zoom;
 
     // Grounding slows drift to a near-stop rather than freezing hard.
@@ -223,6 +292,11 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
         shock += ring * decay * b.w;
     }
 
+    // Per-form weighting, applied once rather than inside the loop.
+    warp *= warpScale;
+    glow *= glowScale;
+    shock *= glowScale;
+
     // ── Form ───────────────────────────────────────────────────────────────
     float detail = 0.0;
     float t;
@@ -233,6 +307,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     }
 
     t += shock * 0.30;
+    t += holdSwing * 0.09;   // the hold shifts hue too, not just brightness
 
     float3 col = palette(t, u.palA, u.palB, u.palC, u.palD);
 
@@ -247,6 +322,10 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // Blooms brighten toward the warm end of the palette.
     col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD) * glow * 1.05;
+
+    // Hold pulse: the whole field swells with light and falls back. Applied
+    // after the blooms so a tap still punches through while you're holding.
+    col *= 1.0 + holdSwing * 0.78;
 
     // Soft vignette keeps the eye centered and hides edge artifacts.
     float vig = 1.0 - 0.35 * dot(uv - 0.5, uv - 0.5) * 2.4;
