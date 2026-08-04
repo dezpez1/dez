@@ -48,7 +48,7 @@ duplication and buys every combination being one worth shipping.
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
 | `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
 | `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
-| `mycelial` | Three cellular nets at once over a domain-warped space — thick cords, a mid net, and fine hyphae filling every enclosed region. Built against a photograph of a real network. |
+| `mycelial` | Two cellular nets — broad felted cords and a mid net — over a tangle of straight threads crossing at every angle. Built against a photograph of a real network. |
 
 | Form | Palettes |
 |---|---|
@@ -57,7 +57,8 @@ duplication and buys every combination being one worth shipping.
 | `weave` | Rust · Jade · Ash · Saffron |
 | `mycelial` | Spore · Fungal · Deep · Filament |
 
-Mycelial costs three Worley lookups plus two `fbm3` calls per pixel — the most
+Mycelial costs two Worley lookups plus two `fbm3` calls and five thread
+directions per pixel — the most
 expensive form by some way, and the reason the picker caps at four live tiles.
 
 The mycelial palettes are built so `t = 0` is exactly black (`a == b`, `d = 0.5`,
@@ -219,10 +220,29 @@ Most of the feel lives in a handful of constants:
 | lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
 | edge crispness | `persistBase` — lattice and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
-| mycelial line weights | the three `smoothstep` widths — `0.13` cords, `0.075` mid net, `0.055` hyphae. Proportional to each layer's own cell size, not absolute |
-| mycelial scale | the `7.0 / 17.0 / 44.0` frequencies. Roughly 15 coarse cells across a screen reads as a mat; 4 reads as a diagram |
-| how packed the cells look | the `fine * 0.55 * open` weight. Empty cells are what make it read as a net rather than a living mat |
+| mycelial cord weight | `0.22 + 0.16 * wr.x` — the noise term is what makes cords read as felted masses instead of drawn strokes |
+| mycelial cell scale | the `7.0` and `17.0` frequencies. Roughly 15 coarse cells across a screen reads as a mat; 4 reads as a diagram |
+| thread density | `228.0 + 19.0 * fk` — spacing per direction. **Each layer needs its own**, see below |
+| thread count | the `k < 5` loop. More directions cost almost nothing; each is a dot product and a sine |
+| how packed the cells look | the `threads * 0.85` weight. Empty cells are what make it read as a net rather than a living mat |
 | cell irregularity | the `* 0.60` domain warp before the cell layers. **Load-bearing** — unwarped Worley gives near-uniform cells and the whole thing reads as crystalline foam |
+
+Two traps in `mycelialField`, both found by looking at renders next to the
+reference:
+
+**Cells can't fill cells.** The fine layer was a third, finer Worley net at
+first. It could never look right, because the level set of a cell field
+*encloses* regions — it can only subdivide into smaller cells, never cross
+itself. A real mat is fibres running straight through each other, and the
+crossings are most of what reads as webbing. The fine layer is five directions
+of straight threads now, and the change is night and day.
+
+**Shared noise across the thread layers makes lace.** All five directions using
+the same spacing and the same perturbation means they cross at coherent points,
+and the result is a repeating rosette. Each layer gets its own spacing, its own
+share of the warp field, and a constant phase offset — the coherence disappears
+for no extra sampling. If threads ever start looking woven rather than tangled,
+this is why.
 | tap surge | `tap * 1.2` inside `churn` — a tap drives the whole network's reorganisation forward, since it has no position to grow from |
 | hold pulse depth | `holdSwing * 0.78` (brightness), `* 0.06` (shape swell), `* 0.09` (hue) |
 | hold pulse rhythm | `Breath.holdPulseSeconds` in `FieldState.swift` |

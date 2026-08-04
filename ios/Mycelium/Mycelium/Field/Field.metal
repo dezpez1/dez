@@ -339,32 +339,57 @@ static inline float mycelialField(float2 p, float drift, float breathWave,
     float2 wr = float2(fbm3(p * 1.6), fbm3(p * 1.6 + 5.3));
     float2 q = p + (wr - 0.5) * 0.60;
 
-    float2 c1 = worley(q * 7.0,         churn);
-    float2 c2 = worley(q * 17.0 + 3.1,  churn * 1.4);
-    float2 c3 = worley(q * 44.0 + 7.7,  churn * 1.9);
+    // Two cellular layers only. The third used to be a finer cell net, which
+    // was the wrong primitive for what fills the cells — see below.
+    float2 c1 = worley(q * 7.0,        churn);
+    float2 c2 = worley(q * 17.0 + 3.1, churn * 1.4);
 
-    // Widths are proportional to each layer's own cell size, not absolute, so
-    // the cords stay chunky relative to their cells while the hyphae stay hair
-    // thin relative to theirs. Matching the reference meant going much finer
-    // than felt right by eye: four coarse cells across a screen reads as a
-    // diagram, and roughly fifteen reads as a mat.
-    float cord = 1.0 - smoothstep(0.0, 0.13,  c1.y - c1.x);
-    float mid  = 1.0 - smoothstep(0.0, 0.075, c2.y - c2.x);
-    float fine = 1.0 - smoothstep(0.0, 0.055, c3.y - c3.x);
+    // Cords are broad felted masses, not drawn lines. Varying the width along
+    // their length with the same low-frequency warp field is what stops them
+    // reading as strokes — a constant-width edge always looks like a diagram
+    // however irregular its path.
+    float cord = 1.0 - smoothstep(0.0, 0.22 + 0.16 * wr.x, c1.y - c1.x);
+    float mid  = 1.0 - smoothstep(0.0, 0.11 + 0.06 * wr.y, c2.y - c2.x);
 
-    // Fine hyphae thin out where a thick cord already runs, so the cords read
-    // as solid strands rather than as fuzz that happens to be denser there.
+    // ── Fine hyphae ────────────────────────────────────────────────────────
+    // A tangle of long straight threads crossing at every angle. This is the
+    // thing a cellular layer fundamentally cannot produce: the level set of a
+    // cell field *encloses* regions, so it can only ever subdivide into
+    // smaller cells. What actually fills a real mat is fibres running straight
+    // through each other, and crossings are most of what makes it read as
+    // webbing rather than as tiling.
+    //
+    // Five directions sharing one noise field, rather than five fbm calls.
+    //
+    // Sharing it naively is wrong though: identical spacing and identical
+    // perturbation makes all five layers cross at coherent points, and the
+    // result is a repeating rosette that reads as lace. Each layer gets its
+    // own spacing, its own share of the warp, and a constant phase offset, and
+    // the coherence disappears for no extra sampling.
+    float nz = fbm3(q * 2.2) * 3.4;
+    float threads = 0.0;
+    for (int k = 0; k < 5; k++) {
+        float fk = float(k);
+        float ang = fk * 1.2566 + drift * 0.004;         // 72° apart
+        float2 dir = float2(cos(ang), sin(ang));
+        float v = dot(q, dir) * (228.0 + 19.0 * fk)
+                + nz * (1.0 + 0.4 * fk)
+                + (wr.x - 0.5) * 9.0 * fk
+                + fk * 31.7;
+        threads = max(threads, 1.0 - smoothstep(0.0, 0.26 + 0.03 * fk, abs(sin(v))));
+    }
+
+    // Everything thins where a cord already runs, so the cords stay solid.
     float open = 1.0 - cord;
 
-    // The fine layer carries real weight rather than being a garnish -- in the
-    // reference every enclosed region is packed with hyphae, and cells left
-    // empty are what made the previous pass look like a net instead of a mat.
-    float web = cord + mid * 0.55 * (0.35 + 0.65 * open) + fine * 0.55 * open;
+    float web = cord
+              + mid * 0.60 * (0.40 + 0.60 * open)
+              + threads * 0.85 * (0.25 + 0.75 * open);
 
-    detail = clamp(cord * 1.2 + mid * 0.4, 0.0, 1.0);
+    detail = clamp(cord * 1.2 + mid * 0.4 + threads * 0.3, 0.0, 1.0);
     // No offset: empty space lands at exactly t = 0, which the mycelial
     // palettes render as black.
-    return web * 1.25;
+    return web * 1.15;
 }
 
 // MARK: - Field pass
