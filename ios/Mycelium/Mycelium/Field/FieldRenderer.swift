@@ -181,7 +181,9 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                                    Float(state.blooms.count),
                                    state.seed,
                                    Float(state.form.rawValue)),
-                holdParams: SIMD4(state.hold, state.holdPhase, 0, 0),
+                // dt goes to the shader so the feedback trail can be locked to
+                // the zoom rate instead of drifting at its own pace.
+                holdParams: SIMD4(state.hold, state.holdPhase, dt, 0),
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),

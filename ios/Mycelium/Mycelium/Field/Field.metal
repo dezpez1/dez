@@ -27,30 +27,33 @@ constant float TAU = 6.28318530718;
 
 constant int FORM_SMOKE = 0;
 constant int FORM_KALEIDOSCOPE = 1;
+constant int FORM_LATTICE = 2;
+constant int FORM_WEAVE = 3;
 
 // A touch does two separable things: it shoves the field around in space
 // (warp), and it flares light and color (glow). Those want different amounts
 // per form.
 //
 // Smoke is a wash with no structure to protect, so it takes both at full.
-// The kaleidoscope's whole point is its symmetry, and warping smears it — so
-// the shove drops to a fifth while the light and color stay nearly full. That
+// Every other form is built on geometry — symmetry, a lattice, a weave — and
+// warping smears exactly the thing that makes it worth looking at. So for those
+// the shove drops to a fifth while the light and colour stay nearly full, which
 // keeps a tap reading as "the pattern pulsed" rather than "the pattern bent."
-constant float WARP_SMOKE = 1.0;
-constant float WARP_KALEIDOSCOPE = 0.20;
-constant float GLOW_SMOKE = 1.0;
-constant float GLOW_KALEIDOSCOPE = 0.85;
+constant float WARP_ORGANIC = 1.0;
+constant float WARP_STRUCTURED = 0.20;
+constant float GLOW_ORGANIC = 1.0;
+constant float GLOW_STRUCTURED = 0.85;
 
 /// Octaves per second of kaleidoscope zoom. One octave = the view has doubled
-/// in magnification. ~0.055 is a doubling every 18s: clearly moving, never
-/// hurried. Raising this past ~0.12 starts to feel like falling.
-constant float ZOOM_RATE = 0.055;
+/// in magnification. 0.10 is a doubling every 10s — unmistakably moving without
+/// being a ride. Past ~0.2 it starts to feel like falling.
+constant float ZOOM_RATE = 0.10;
 
 // Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
 struct Uniforms {
     float4 resTime;     // xy = resolution px, z = time s, w = breath phase 0..1
     float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = form
-    float4 holdParams;  // x = hold amount 0..1, y = hold phase 0..1, zw spare
+    float4 holdParams;  // x = hold amount 0..1, y = hold phase 0..1, z = frame dt s, w spare
     float4 palA;        // IQ cosine palette: bias
     float4 palB;        //                    amplitude
     float4 palC;        //                    frequency
@@ -214,6 +217,85 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
     return trapRadial * 1.45 + trapAxis * 0.85 + breathWave * 0.04;
 }
 
+/// Lattice — two hexagonal grids laid over each other at a slowly changing
+/// relative angle and scale. The pattern you see isn't either grid: it's the
+/// interference between them, which is why a fraction of a degree of drift
+/// reorganises the entire screen. Pure geometry, no noise anywhere.
+static inline float latticeField(float2 p, float drift, float breathWave,
+                                 float2 warp, thread float &detail) {
+    p += warp * 1.4;
+
+    // Fine enough that the grid itself reads as a grid. The first version used
+    // scale 9, which put barely one period on screen — the whole display became
+    // a single soft blob with no lattice visible anywhere.
+    float scale = 110.0 * (1.0 + breathWave * 0.02);
+
+    // Both copies turn together slowly; what matters is the small angle
+    // BETWEEN them, and that oscillates inside a narrow band rather than
+    // running free. Letting the relative angle sweep sends the moire from
+    // one screen-sized blob to invisible grain within a few seconds — the
+    // interesting range is only about a tenth of a radian wide, so the form
+    // has to live inside it deliberately.
+    float base  = drift * 0.006;
+    float split = 0.085 + 0.030 * sin(drift * 0.045);
+
+    float sum = 0.0;
+    float sharp = 0.0;
+
+    for (int layer = 0; layer < 2; layer++) {
+        float rot = base + (layer == 0 ? -split : split) * 0.5;
+        float cs = cos(rot), sn = sin(rot);
+        float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs) * scale;
+
+        // Three axes at 60 degrees = a hexagonal lattice. Summed cosines
+        // rather than a distance field, so it stays smooth and can't alias.
+        for (int k = 0; k < 3; k++) {
+            float a = float(k) * (M_PI_F / 3.0);
+            float w = cos(dot(q, float2(cos(a), sin(a))));
+            sum += w;
+            sharp += w * w;
+        }
+    }
+
+    // Crests where the two lattices agree — the bright nodes of the moire.
+    detail = clamp(pow(max(sharp / 6.0, 0.0), 3.0) * 1.6, 0.0, 1.0);
+    return sum * 0.18 + 0.5 + breathWave * 0.04;
+}
+
+/// Weave — Truchet tiling. Every cell holds two quarter-circle arcs, flipped
+/// by a per-cell hash, and the arcs always meet at the cell edges. The result
+/// is one continuous woven maze that never repeats and never breaks. The grid
+/// drifts and turns so the weave reorganises without ever cutting.
+static inline float weaveField(float2 p, float drift, float breathWave,
+                               float2 warp, thread float &detail) {
+    float rot = drift * 0.015;
+    float cs = cos(rot), sn = sin(rot);
+    float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
+
+    q = q * (7.5 + breathWave * 0.25) + warp * 2.2;
+    q += float2(drift * 0.035, drift * 0.021);   // slow travel across the weave
+
+    float2 cell = floor(q);
+    float2 f = fract(q);
+
+    // The hash picks which diagonal the arcs run along. Flipping x mirrors the
+    // tile, which is the whole trick — both orientations still meet their
+    // neighbours at the edge midpoints, so the ribbon is always continuous.
+    if (hash21(cell) < 0.5) f.x = 1.0 - f.x;
+
+    // Distance to the nearer of the two quarter arcs.
+    float d = min(length(f), length(f - 1.0));
+    float ribbon = abs(d - 0.5);
+
+    // Two widths: a band for colour, a tight core for the bright thread. The
+    // band was 0.42 wide at first, which blurred the ribbon into lava — the
+    // appeal of this form is that the edges are hard, so it stays narrow.
+    float band = 1.0 - smoothstep(0.05, 0.26, ribbon);
+    detail = 1.0 - smoothstep(0.0, 0.055, ribbon);
+
+    return band * 0.85 + ribbon * 0.55 + breathWave * 0.04;
+}
+
 // MARK: - Field pass
 
 fragment float4 fieldFragment(VertexOut in [[stage_in]],
@@ -233,8 +315,9 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // Smoke is the default form, so it's the one tested for and the one
     // anything unrecognised falls back to.
-    float warpScale = (form == FORM_SMOKE) ? WARP_SMOKE : WARP_KALEIDOSCOPE;
-    float glowScale = (form == FORM_SMOKE) ? GLOW_SMOKE : GLOW_KALEIDOSCOPE;
+    bool organic = (form == FORM_SMOKE);
+    float warpScale = organic ? WARP_ORGANIC : WARP_STRUCTURED;
+    float glowScale = organic ? GLOW_ORGANIC : GLOW_STRUCTURED;
 
     // Hold-to-pulse: glow, dim, glow, dim, for as long as a finger rests.
     // Starts at the TOP of the swing so pressing brightens immediately — the
@@ -302,6 +385,10 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float t;
     if (form == FORM_KALEIDOSCOPE) {
         t = kaleidoscopeField(p, drift, breathWave, warp, detail);
+    } else if (form == FORM_LATTICE) {
+        t = latticeField(p, drift, breathWave, warp, detail);
+    } else if (form == FORM_WEAVE) {
+        t = weaveField(p, drift, breathWave, warp, detail);
     } else {
         t = smokeField(p, drift, breathWave, warp, detail);
     }
@@ -339,14 +426,28 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     col *= mix(1.0, 0.55, grounding);
 
     // Feedback: blend with the previous frame, slightly contracted so trails
-    // drift inward instead of smearing outward. This is what makes strokes
-    // persist and slowly become part of the pattern.
+    // drift outward. This is what makes strokes persist and slowly become part
+    // of the pattern.
     //
     // Tuned by eye against the simulator: much above ~0.55 and both the fresh
     // structure and a new bloom drown in their own history.
-    float2 fbUV = (uv - 0.5) * 0.998 + 0.5;
+    //
+    // On the kaleidoscope the contraction is locked to the zoom rate rather
+    // than left at a fixed 0.998. A fixed value drifts the trail outward at
+    // ~11%/s against a field zooming at ~4%/s, and a ghost travelling 3x faster
+    // than the thing casting it doesn't read as motion — it reads as blur, and
+    // it buries the zoom entirely. Matched, the history lands exactly where the
+    // pattern is going and the whole frame moves as one.
+    float dt = max(u.holdParams.z, 1.0 / 240.0);
+    float fbContract = (form == FORM_KALEIDOSCOPE) ? exp2(-ZOOM_RATE * dt) : 0.998;
+    float2 fbUV = (uv - 0.5) * fbContract + 0.5;
     float3 history = prev.sample(smp, fbUV).rgb;
-    float persistence = mix(0.66, 0.84, grounding);   // holds longer when grounded
+    // Lattice and weave live or die on hard edges, and heavy feedback is
+    // exactly what softens them. They keep much less history than the two
+    // forms whose appeal is smear in the first place.
+    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE);
+    float persistBase = crisp ? 0.34 : 0.66;
+    float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72);
 
     return float4(col, 1.0);

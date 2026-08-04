@@ -246,7 +246,8 @@ struct RootView: View {
                 Spacer(minLength: 20)
 
                 VStack(spacing: 6) {
-                    legend("one finger", "bloom")
+                    legend("tap", "pulse")
+                    legend("press and rest", "glow and dim")
                     legend("two fingers, hold", "ground me")
                     legend("three fingers", "leave")
                 }

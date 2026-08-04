@@ -42,6 +42,8 @@ independent — any form renders in any palette.
 |---|---|
 | `smoke` | Two-level domain-warped fbm with a ridged overlay. Ink bleeding through water. |
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
+| `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
+| `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
 
 Moods: `drift` `ember` `bloom` `verdant` `aurora`
 
@@ -139,7 +141,8 @@ xcrun simctl launch <udid> com.dez.mycelium -field ember -ground
 xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field drift -hold
 ```
 
-`-form` takes `smoke` or `kaleidoscope`; `-field` takes any mood.
+`-form` takes any form name (`smoke`, `kaleidoscope`, `lattice`, `weave`);
+`-field` takes any mood.
 
 ## Tuning
 
@@ -153,8 +156,12 @@ Most of the feel lives in a handful of constants:
 | bloom brightness | the `glow * 1.05` term |
 | bloom size and travel | `radius = age * 0.30`, and the `* 5.5` ring tightness |
 | how hard a touch hits | `warp * 0.26` (displacement) and `shock * 0.30` (hue push) |
-| how hard a touch hits *per form* | `WARP_*` and `GLOW_*` in `Field.metal` — warp is the part that smears symmetry, glow is the part that doesn't, so the kaleidoscope keeps one and not the other |
-| kaleidoscope zoom speed | `ZOOM_RATE` — octaves per second. Past ~0.12 it stops being hypnotic and starts feeling like falling |
+| how hard a touch hits *per form* | `WARP_ORGANIC` / `WARP_STRUCTURED` and the `GLOW_*` pair — warp is the part that smears geometry, glow is the part that doesn't, so every form except smoke keeps one and not the other |
+| kaleidoscope zoom speed | `ZOOM_RATE` — octaves per second. Past ~0.2 it stops being hypnotic and starts feeling like falling. **Changing this alone is enough; the feedback trail follows it automatically** |
+| lattice moiré scale | `split` in `latticeField` — the *relative* angle between the two grids. The interesting range is only about a tenth of a radian wide; outside it you get one screen-sized blob or invisible grain |
+| lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
+| weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
+| edge crispness | `persistBase` — lattice and weave hold far less history than smoke and kaleidoscope, because feedback is exactly what softens a hard edge |
 | hold pulse depth | `holdSwing * 0.78` (brightness), `* 0.06` (shape swell), `* 0.09` (hue) |
 | hold pulse rhythm | `Breath.holdPulseSeconds` in `FieldState.swift` |
 | how fast the hold engages / releases | `holdRate` in `FieldState.advance` (asymmetric on purpose), `holdDelay` and `holdSlop` in `FieldView.swift` |
@@ -195,6 +202,19 @@ point. This was tried both ways; linear won.
 
 Cost is 18 fractal iterations per pixel instead of 9. Fine at 60fps, and fine
 on the 30fps preview tiles.
+
+**The feedback trail has to be locked to the zoom rate.** This is the part that
+actually made the zoom visible, and it isn't obvious. The accumulation blend
+samples history at `(uv - 0.5) * contract + 0.5`, and that constant was a fixed
+`0.998` — which at 60fps drifts the trail outward at **11.3%/second**. The
+kaleidoscope was zooming at 3.9%/second. A ghost travelling 2.9x faster than the
+thing casting it doesn't read as motion; it reads as blur, and it buried the
+zoom completely. The contraction is now `exp2(-ZOOM_RATE * dt)` for that form,
+using the real frame delta passed in `holdParams.z`, so history lands exactly
+where the pattern is going.
+
+If you add a form that moves the whole field coherently, it needs the same
+treatment. A fixed contraction only works for forms that churn in place.
 
 ### One trap worth knowing
 

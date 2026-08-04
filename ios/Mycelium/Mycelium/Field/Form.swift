@@ -12,6 +12,8 @@ import Foundation
 enum Form: Int, CaseIterable, Identifiable, Sendable {
     case smoke = 0
     case kaleidoscope = 1
+    case lattice = 2
+    case weave = 3
     // Next up, per the plan: mycelial growth, liquid light.
 
     var id: Int { rawValue }
@@ -20,6 +22,8 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .smoke:        return "Smoke"
         case .kaleidoscope: return "Kaleidoscope"
+        case .lattice:      return "Lattice"
+        case .weave:        return "Weave"
         }
     }
 
@@ -28,6 +32,8 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .smoke:        return "ink through water"
         case .kaleidoscope: return "fractal, sixfold"
+        case .lattice:      return "grids interfering"
+        case .weave:        return "one endless ribbon"
         }
     }
 }
