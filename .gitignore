@@ -18,3 +18,7 @@ recordings/
 *.m4a
 *.caf
 .env
+
+# Source art for the app icon. The committed 1024 icon is the deliverable;
+# the full-res original stays local.
+*.avif
