@@ -173,7 +173,7 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
             enc.setRenderPipelineState(fieldPipeline)
 
             let size = view.drawableSize
-            let pal = state.mood.palette
+            let pal = state.palette
             var uniforms = Uniforms(
                 resTime: SIMD4(Float(size.width), Float(size.height),
                                state.elapsed, state.breathPhase),

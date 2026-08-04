@@ -20,62 +20,6 @@ struct Bloom: Equatable, Codable, Sendable {
     var packed: SIMD4<Float> { SIMD4(x, y, birth, strength) }
 }
 
-/// IQ cosine palette parameters: color(t) = a + b * cos(2pi * (c*t + d))
-struct Palette: Equatable, Sendable {
-    var a: SIMD3<Float>
-    var b: SIMD3<Float>
-    var c: SIMD3<Float>
-    var d: SIMD3<Float>
-}
-
-/// Named moods. The "Before" screen will map a written intention onto one of
-/// these; for now they're selectable directly.
-enum Mood: String, CaseIterable, Identifiable, Sendable {
-    case drift, ember, bloom, verdant, aurora
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .drift:   return "Drift"
-        case .ember:   return "Ember"
-        case .bloom:   return "Bloom"
-        case .verdant: return "Verdant"
-        case .aurora:  return "Aurora"
-        }
-    }
-
-    var palette: Palette {
-        switch self {
-        case .drift:
-            return Palette(a: SIMD3(0.22, 0.34, 0.44),
-                           b: SIMD3(0.28, 0.34, 0.38),
-                           c: SIMD3(1.00, 0.95, 0.60),
-                           d: SIMD3(0.00, 0.18, 0.42))
-        case .ember:
-            return Palette(a: SIMD3(0.44, 0.26, 0.18),
-                           b: SIMD3(0.40, 0.26, 0.16),
-                           c: SIMD3(0.90, 0.80, 0.55),
-                           d: SIMD3(0.02, 0.12, 0.24))
-        case .bloom:
-            return Palette(a: SIMD3(0.38, 0.22, 0.42),
-                           b: SIMD3(0.36, 0.24, 0.38),
-                           c: SIMD3(1.00, 0.85, 0.75),
-                           d: SIMD3(0.10, 0.32, 0.58))
-        case .verdant:
-            return Palette(a: SIMD3(0.22, 0.38, 0.28),
-                           b: SIMD3(0.24, 0.36, 0.26),
-                           c: SIMD3(0.85, 1.00, 0.70),
-                           d: SIMD3(0.18, 0.06, 0.34))
-        case .aurora:
-            return Palette(a: SIMD3(0.30, 0.32, 0.38),
-                           b: SIMD3(0.34, 0.36, 0.36),
-                           c: SIMD3(1.00, 1.00, 1.00),
-                           d: SIMD3(0.00, 0.33, 0.67))
-        }
-    }
-}
-
 /// Breath pacing. Grounded pacing is resonant breathing — 5.5 breaths per
 /// minute, i.e. a ~11s full cycle (5.5s in, 5.5s out). That number is the
 /// point of the mode, so it's a named constant rather than a magic float.
@@ -99,10 +43,18 @@ final class FieldState {
 
     private(set) var blooms: [Bloom] = []
 
-    /// The two axes of the look, deliberately independent — any form renders
-    /// in any palette.
-    var form: Form = .smoke
-    var mood: Mood = .drift
+    /// Which form is running, and which of that form's own palettes is
+    /// selected. Palettes belong to the form now — see Form.swift for why —
+    /// so this is an index into `form.palettes`, not a global mood.
+    var form: Form = .smoke {
+        didSet { paletteIndex = min(paletteIndex, form.palettes.count - 1) }
+    }
+    var paletteIndex: Int = 0
+
+    var palette: Palette {
+        let all = form.palettes
+        return all[min(max(paletteIndex, 0), all.count - 1)]
+    }
 
     /// 0 = normal, 1 = fully grounded. Eased, never snapped — a hard cut to
     /// grounding mode would be its own jolt.

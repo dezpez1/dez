@@ -44,19 +44,19 @@ private struct FieldPreviewRepresentable: UIViewRepresentable {
 
 private struct PreviewTile: View {
     let form: Form
-    @Binding var mood: Mood
+    @Binding var paletteIndex: Int
     let onTap: () -> Void
 
     @State private var state: FieldState
     @State private var nudge: CGFloat = 0
 
-    init(form: Form, mood: Binding<Mood>, onTap: @escaping () -> Void) {
+    init(form: Form, paletteIndex: Binding<Int>, onTap: @escaping () -> Void) {
         self.form = form
-        self._mood = mood
+        self._paletteIndex = paletteIndex
         self.onTap = onTap
         let s = FieldState()
         s.form = form
-        s.mood = mood.wrappedValue
+        s.paletteIndex = paletteIndex.wrappedValue
         self._state = State(initialValue: s)
     }
 
@@ -76,7 +76,7 @@ private struct PreviewTile: View {
                 Text(form.blurb)
                     .font(.system(size: 12, weight: .light))
                     .foregroundStyle(.white.opacity(0.55))
-                moodDots
+                paletteDots
                     .padding(.top, 3)
             }
             .padding(13)
@@ -98,32 +98,32 @@ private struct PreviewTile: View {
                     cycle(forward: value.translation.width < 0)
                 }
         )
-        .onChange(of: mood) { _, new in state.mood = new }
+        .onChange(of: paletteIndex) { _, new in state.paletteIndex = new }
     }
 
-    private var moodDots: some View {
+    private var paletteDots: some View {
         HStack(spacing: 5) {
-            ForEach(Mood.allCases) { m in
+            ForEach(form.palettes.indices, id: \.self) { i in
                 Circle()
-                    .fill(.white.opacity(m == mood ? 0.85 : 0.22))
+                    .fill(.white.opacity(i == paletteIndex ? 0.85 : 0.22))
                     .frame(width: 5, height: 5)
             }
         }
     }
 
     private func cycle(forward: Bool) {
-        let all = Mood.allCases
-        guard let i = all.firstIndex(of: mood) else { return }
+        let count = form.palettes.count
+        guard count > 1 else { return }
         let next = forward
-            ? all[(i + 1) % all.count]
-            : all[(i - 1 + all.count) % all.count]
+            ? (paletteIndex + 1) % count
+            : (paletteIndex - 1 + count) % count
 
         // A small shove in the swipe direction so the palette change reads as
         // a response to the gesture rather than a value quietly updating.
         withAnimation(.spring(response: 0.28, dampingFraction: 0.6)) {
             nudge = forward ? -9 : 9
         }
-        mood = next
+        paletteIndex = next
         withAnimation(.spring(response: 0.42, dampingFraction: 0.7).delay(0.06)) {
             nudge = 0
         }
@@ -136,9 +136,10 @@ struct RootView: View {
     @State private var session = FieldState()
     @State private var inSession = false
 
-    /// Each form remembers the palette you last left it on.
-    @State private var moods: [Form: Mood] = Dictionary(
-        uniqueKeysWithValues: Form.allCases.map { ($0, .drift) })
+    /// Each form remembers the palette you last left it on. Indices, because
+    /// the palettes themselves now belong to the form.
+    @State private var palettes: [Form: Int] = Dictionary(
+        uniqueKeysWithValues: Form.allCases.map { ($0, 0) })
 
     var body: some View {
         Group {
@@ -154,9 +155,9 @@ struct RootView: View {
         // a finger on the glass, which is the only way to verify blooms and
         // grounding from a headless simulator.
         //
-        //   xcrun simctl launch <udid> com.dez.mycelium -field bloom
-        //   xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field aurora
-        //   xcrun simctl launch <udid> com.dez.mycelium -field drift -blooms
+        //   xcrun simctl launch <udid> com.dez.mycelium -field ink
+        //   xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field reef
+        //   xcrun simctl launch <udid> com.dez.mycelium -form mycelial -field spore -blooms
         //   xcrun simctl launch <udid> com.dez.mycelium -field ember -ground
         .onAppear {
             let args = ProcessInfo.processInfo.arguments
@@ -169,8 +170,11 @@ struct RootView: View {
             }
 
             guard let i = args.firstIndex(of: "-field") else { return }
-            if i + 1 < args.count, let m = Mood(rawValue: args[i + 1]) {
-                session.mood = m
+            if i + 1 < args.count,
+               let p = session.form.palettes.firstIndex(where: {
+                   $0.name.lowercased() == args[i + 1].lowercased()
+               }) {
+                session.paletteIndex = p
             }
             inSession = true
 
@@ -231,10 +235,13 @@ struct RootView: View {
                         .foregroundStyle(.white.opacity(0.38))
                         .kerning(0.6)
                 }
-                .padding(.top, 28)
+                .padding(.top, 18)
+                .padding(.bottom, 16)
 
-                Spacer(minLength: 20)
-
+                // Scrolls, because forms keep arriving. Two rows sit on screen
+                // and the third peeks, which is what tells you there's more
+                // without needing to say so.
+                ScrollView(.vertical, showsIndicators: false) {
                 LazyVGrid(
                     columns: [GridItem(.flexible(), spacing: 12),
                               GridItem(.flexible(), spacing: 12)],
@@ -243,12 +250,12 @@ struct RootView: View {
                     ForEach(Form.allCases) { form in
                         PreviewTile(
                             form: form,
-                            mood: Binding(
-                                get: { moods[form] ?? .drift },
-                                set: { moods[form] = $0 })
+                            paletteIndex: Binding(
+                                get: { palettes[form] ?? 0 },
+                                set: { palettes[form] = $0 })
                         ) {
                             session.form = form
-                            session.mood = moods[form] ?? .drift
+                            session.paletteIndex = palettes[form] ?? 0
                             withAnimation(.easeInOut(duration: 0.65)) {
                                 inSession = true
                             }
@@ -256,8 +263,8 @@ struct RootView: View {
                     }
                 }
                 .padding(.horizontal, 14)
-
-                Spacer(minLength: 20)
+                .padding(.bottom, 10)
+                }
 
                 VStack(spacing: 6) {
                     legend("tap", "pulse")
@@ -265,9 +272,11 @@ struct RootView: View {
                     legend("two fingers, hold", "ground me")
                     legend("three fingers", "leave")
                 }
-                .padding(.bottom, 30)
+                .padding(.top, 12)
+                .padding(.bottom, 26)
             }
         }
+        .statusBarHidden()
     }
 
     private func legend(_ gesture: String, _ effect: String) -> some View {

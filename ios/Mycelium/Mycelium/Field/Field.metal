@@ -29,6 +29,7 @@ constant int FORM_SMOKE = 0;
 constant int FORM_KALEIDOSCOPE = 1;
 constant int FORM_LATTICE = 2;
 constant int FORM_WEAVE = 3;
+constant int FORM_MYCELIAL = 4;
 
 // How much of a tap each form takes. Smoke is a wash and can absorb a lot;
 // the geometric forms already carry strong structure and a heavy flare washes
@@ -301,6 +302,67 @@ static inline float weaveField(float2 p, float drift, float breathWave,
     return band * 0.85 + ribbon * 0.55 + breathWave * 0.04;
 }
 
+/// Worley / cellular noise. Returns the two nearest site distances (F1, F2).
+/// `churn` walks every site along its own little orbit, so the cell boundaries
+/// migrate and the network reorganises instead of sitting still.
+static inline float2 worley(float2 p, float churn) {
+    float2 n = floor(p);
+    float2 f = fract(p);
+    float f1 = 8.0, f2 = 8.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            float2 g = float2(i, j);
+            float2 h = float2(hash21(n + g), hash21(n + g + 17.3));
+            float2 site = 0.5 + 0.42 * sin(churn + TAU * h);
+            float d = length(g + site - f);
+            if (d < f1)      { f2 = f1; f1 = d; }
+            else if (d < f2) { f2 = d; }
+        }
+    }
+    return float2(f1, f2);
+}
+
+/// Mycelial — a living network. The filaments are the *boundaries* between
+/// cells, not the cells: where the two nearest sites are equidistant, F2 - F1
+/// goes to zero, and that set is exactly a connected web with junctions where
+/// three cells meet. Getting branching structure for free out of a distance
+/// comparison is the whole reason this form is cheap enough to run.
+///
+/// Two octaves — trunks and hyphae — plus a ridged layer for the fine fuzz.
+/// Three octaves looked better and cost 27 cell lookups a pixel, which is too
+/// much with five of these running at once on the picker.
+///
+/// `tap` is the only place any form takes the touch signal directly. A tap
+/// doesn't land anywhere, so it can't seed growth at a point; instead it surges
+/// the entire colony — sites lurch along their orbits and the whole web throws
+/// new branches at once. That is what a touch means on this form.
+static inline float mycelialField(float2 p, float drift, float breathWave,
+                                  float tap, thread float &detail) {
+    // The colony creeps. Slow enough that you only notice it having happened.
+    p += float2(drift * 0.011, drift * 0.008);
+
+    // A tap kicks the churn forward, so the network visibly reorganises rather
+    // than merely brightening.
+    float churn = drift * 0.09 + tap * 1.5;
+
+    float2 coarse = worley(p * (2.9 + breathWave * 0.06), churn);
+    float2 fine   = worley(p * 7.4, churn * 1.7 + 11.0);
+
+    // Thick trunks, thinner hyphae.
+    float trunk = 1.0 - smoothstep(0.0, 0.13, coarse.y - coarse.x);
+    float hypha = 1.0 - smoothstep(0.0, 0.07, fine.y - fine.x);
+
+    // Fuzz along the filaments, so they read as grown rather than drawn.
+    float fuzz = ridged(p * 5.5 + drift * 0.02);
+
+    float web = trunk * 0.85 + hypha * 0.55 * (0.35 + 0.65 * trunk);
+
+    // The bright cores of the network — the part a tap makes surge.
+    detail = clamp(trunk * (0.55 + 0.45 * fuzz) + hypha * 0.35, 0.0, 1.0);
+
+    return web * 0.9 + fuzz * 0.12 + breathWave * 0.04;
+}
+
 // MARK: - Field pass
 
 fragment float4 fieldFragment(VertexOut in [[stage_in]],
@@ -377,6 +439,8 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
         t = latticeField(p, drift, breathWave, detail);
     } else if (form == FORM_WEAVE) {
         t = weaveField(p, drift, breathWave, detail);
+    } else if (form == FORM_MYCELIAL) {
+        t = mycelialField(p, drift, breathWave, tap, detail);
     } else {
         t = smokeField(p, drift, breathWave, detail);
     }
@@ -436,7 +500,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // Lattice and weave live or die on hard edges, and heavy feedback is
     // exactly what softens them. They keep much less history than the two
     // forms whose appeal is smear in the first place.
-    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE);
+    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE || form == FORM_MYCELIAL);
     float persistBase = crisp ? 0.34 : 0.66;
     float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72);

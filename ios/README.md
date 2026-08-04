@@ -26,17 +26,22 @@ Mycelium/
 ├── Session/RootView.swift     live-preview picker → session ("Before" screen)
 ├── Field/
 │   ├── Field.metal            the shader — this is the product
-│   ├── Form.swift             which shape the field takes
+│   ├── Form.swift             which shape the field takes, and its palettes
 │   ├── FieldRenderer.swift    two-pass ping-pong renderer
-│   ├── FieldState.swift       blooms, breath, grounding, form, palette
+│   ├── FieldState.swift       taps, breath, grounding, form, palette index
 │   └── FieldView.swift        MTKView + touch handling
 └── Grounding/Haptics.swift    breath-paced haptic pulse
 ```
 
-## Two axes: form and mood
+## Forms and their palettes
 
-**Form** is the shape of the visual. **Mood** is the palette. They're fully
-independent — any form renders in any palette.
+**Form** is the shape of the visual. Each form carries **its own palettes**.
+
+Those used to be orthogonal — five shared moods, any form in any palette — and
+it didn't survive contact. A full-spectrum sweep that looks alive on smoke goes
+garish on the kaleidoscope, because that form already carries its own structure
+and doesn't need the colour arguing with it. Curating per form costs a little
+duplication and buys every combination being one worth shipping.
 
 | Form | |
 |---|---|
@@ -44,14 +49,20 @@ independent — any form renders in any palette.
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
 | `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
 | `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
+| `mycelial` | A living network. The filaments are the *boundaries* between Worley cells — the set where the two nearest sites are equidistant — so branching structure and three-way junctions fall out of a distance comparison for free. |
 
-Moods: `drift` `ember` `bloom` `verdant` `aurora`
+| Form | Palettes |
+|---|---|
+| `smoke` | Drift · Ember · Bloom · Ink |
+| `kaleidoscope` | Obsidian · Reef · Bone · Vespers |
+| `lattice` | Neon · Chrome · Ultraviolet · Signal |
+| `weave` | Rust · Jade · Ash · Saffron |
+| `mycelial` | Spore · Fungal · Deep · Filament |
 
-**Adding a form** is three small edits: a case in `Form.swift`, a
-`somethingField()` function in `Field.metal`, and a branch in `fieldFragment`.
-Nothing else needs to know. Next up per the plan: mycelial growth (branching
-filaments, so two people's touches visibly grow toward each other) and liquid
-light (caustics and refraction).
+**Adding a form** is three small edits: a case in `Form.swift` with its
+palettes, a `somethingField()` function in `Field.metal`, and a branch in
+`fieldFragment`. Nothing else needs to know. Next up per the plan: liquid light
+(caustics and refraction).
 
 ## Gestures
 
@@ -82,9 +93,10 @@ people who can't read a UI and shouldn't have to hit a target.
 
 **A touch has no position.** Tapping the corner and tapping dead centre produce
 an identical field. Position is still written to the event log — it costs
-nothing, the log is what sync and replay are built on, and forms that use it are
-coming (mycelial growth reaches out from where you touched) — but no shader
-reads it today.
+nothing and the log is what sync and replay are built on — but no shader reads
+it. On `mycelial`, where a positional touch would have seeded growth at a point,
+a tap instead surges the *whole* colony: every site lurches along its orbit and
+the entire web throws new branches at once.
 
 The pulse fires on contact rather than after the gesture is classified, so a tap
 never feels late. The hold then engages at 0.4s if the finger hasn't wandered.
@@ -163,21 +175,25 @@ of whole-screen flashes at finger speed is exactly the thing being avoided.
 # jump straight into the Field, skipping the picker
 xcrun simctl launch <udid> com.dez.mycelium -field bloom
 
-# pick a form too
-xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field aurora
+# pick a form too — note the palette name has to belong to that form
+xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field reef
 
-# inject blooms 5s in (for screenshots — you can't tap a headless sim)
-xcrun simctl launch <udid> com.dez.mycelium -field drift -blooms
+# inject taps 5s in (for screenshots — you can't tap a headless sim)
+xcrun simctl launch <udid> com.dez.mycelium -form mycelial -field spore -blooms
+
+# twenty taps in a row, the case that used to blow the field out
+xcrun simctl launch <udid> com.dez.mycelium -form weave -field rust -burst
 
 # start already grounded, to compare against normal
 xcrun simctl launch <udid> com.dez.mycelium -field ember -ground
 
 # start with the hold pulse engaged (you can't rest a finger on a headless sim)
-xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field drift -hold
+xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field bone -hold
 ```
 
-`-form` takes any form name (`smoke`, `kaleidoscope`, `lattice`, `weave`);
-`-field` takes any mood.
+`-form` takes any form name. `-field` takes a palette name **belonging to that
+form** — pass `-form` first, since the palette is resolved against whichever
+form is currently selected.
 
 ## Tuning
 
@@ -197,7 +213,10 @@ Most of the feel lives in a handful of constants:
 | lattice moiré scale | `split` in `latticeField` — the *relative* angle between the two grids. The interesting range is only about a tenth of a radian wide; outside it you get one screen-sized blob or invisible grain |
 | lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
-| edge crispness | `persistBase` — lattice and weave hold far less history than smoke and kaleidoscope, because feedback is exactly what softens a hard edge |
+| edge crispness | `persistBase` — lattice, weave and mycelial hold far less history than smoke and kaleidoscope, because feedback is exactly what softens a hard edge |
+| mycelial filament thickness | the two `smoothstep` widths in `mycelialField` — `0.13` for trunks, `0.07` for hyphae |
+| how fast the network reorganises | `churn` in `mycelialField`. The `tap * 1.5` term is what makes a touch surge the colony rather than only brighten it |
+| mycelial cost | two Worley octaves, 18 cell lookups per pixel. Three octaves looked better and cost 27, which is too much with five live tiles running on the picker |
 | hold pulse depth | `holdSwing * 0.78` (brightness), `* 0.06` (shape swell), `* 0.09` (hue) |
 | hold pulse rhythm | `Breath.holdPulseSeconds` in `FieldState.swift` |
 | how fast the hold engages / releases | `holdRate` in `FieldState.advance` (asymmetric on purpose), `holdDelay` and `holdSlop` in `FieldView.swift` |
