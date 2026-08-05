@@ -48,9 +48,35 @@ static inline float tapEnvelope(float age) {
 }
 
 /// Octaves per second of kaleidoscope zoom. One octave = the view has doubled
-/// in magnification. 0.10 is a doubling every 10s — unmistakably moving without
-/// being a ride. Past ~0.2 it starts to feel like falling.
-constant float ZOOM_RATE = 0.10;
+/// in magnification. Was 0.10, a doubling every 10s, which read as unmistakably
+/// moving but slow; 0.16 is every 6.3s and has more of the falling-in quality
+/// the form is for. Past ~0.25 it stops being something you can rest your eyes
+/// on.
+///
+/// Changing this alone is safe: the feedback contraction is derived from it, so
+/// the trail rate follows automatically. They must never be set independently —
+/// see the note in the feedback block for what happens when they disagree.
+constant float KALEIDO_ZOOM_RATE = 0.16;
+
+/// Octaves per second the mycelial camera pulls BACK. The same octave
+/// cross-fade as the kaleidoscope, run in the other direction: rather than
+/// falling into the pattern, the view retreats from it and the colony appears
+/// to spread outward to fill the space being revealed.
+///
+/// Much slower than the kaleidoscope on purpose. This one is meant to be
+/// growth, and growth you can catch happening is growth that's too fast — at
+/// 0.045 the view doubles every ~22s, which is about the point where you can
+/// tell it moved but never see it moving.
+constant float MYCELIAL_GROW_RATE = 0.045;
+
+/// The colony's radius on screen, in field-space units where the visible area
+/// is roughly 0.46 wide and 1.0 tall. It starts as a blob a little wider than
+/// the screen is, and settles past the corners (~0.55) so that at rest the mat
+/// covers the frame — but only just, and the ragged margin still bares a corner
+/// now and then.
+constant float COLONY_START = 0.34;
+constant float COLONY_SETTLE = 0.78;
+constant float COLONY_SPREAD_SECONDS = 45.0;
 
 // Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
 struct Uniforms {
@@ -188,7 +214,7 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
     // The seam-free property comes from the octave spacing alone, not from the
     // fractal being self-similar. The Kali set isn't, exactly, which is the
     // good part: you keep arriving somewhere new that still looks like home.
-    float k = fract(drift * ZOOM_RATE);
+    float k = fract(drift * KALEIDO_ZOOM_RATE);
 
     float radialNear, axisNear, radialFar, axisFar;
     kaliLayer(q * exp2(-k),       c, radialNear, axisNear);
@@ -327,14 +353,12 @@ static inline float2 worley(float2 p, float churn) {
 /// one net but three at once: chunky cords, a mid net, and dense fine hyphae
 /// filling every enclosed region. A single scale, however pretty, always reads
 /// as a diagram.
-static inline float mycelialField(float2 p, float drift, float breathWave,
-                                  float tap, thread float &detail) {
-    p *= 1.0 + breathWave * 0.03;
+///
+/// This is one octave of the mat. The camera pulls steadily back from it, so
+/// `mycelialField` below evaluates it twice and cross-fades — see there.
+static inline float mycelialLayer(float2 p, float drift, float churn,
+                                  thread float &detail) {
     p += float2(drift * 0.006, drift * 0.004);   // the mat creeps
-
-    // A tap drives the churn forward, so the whole network visibly reorganises
-    // rather than only brightening.
-    float churn = drift * 0.05 + tap * 1.2;
 
     float2 wr = float2(fbm3(p * 1.6), fbm3(p * 1.6 + 5.3));
     float2 q = p + (wr - 0.5) * 0.60;
@@ -387,9 +411,94 @@ static inline float mycelialField(float2 p, float drift, float breathWave,
               + threads * 0.85 * (0.25 + 0.75 * open);
 
     detail = clamp(cord * 1.2 + mid * 0.4 + threads * 0.3, 0.0, 1.0);
+    return web;
+}
+
+/// The colony: one blob of mat, spreading, with the camera retreating from it
+/// forever.
+///
+/// Two things are happening at once and they are easy to confuse.
+///
+/// The retreat is the kaleidoscope's octave cross-fade run backwards. A single
+/// layer cannot simply be scaled up without limit — the cell size on screen
+/// halves every octave, and within a minute the mat is finer than a pixel and
+/// aliases into grey mush. So two copies run an octave apart and cross-fade:
+/// the near one grows from 1x to 2x while the far one grows from 0.5x to 1x,
+/// and at the wrap the far layer is sitting exactly where the near one began.
+/// The scale on screen therefore never actually changes, but the motion of
+/// everything moving inward and new structure appearing at the edges is
+/// unambiguous, and it reads as growth rather than as a camera move.
+///
+/// The front is separate, and it is what makes the first thirty seconds a
+/// *colony* instead of an infinite mat. It's measured in SCREEN space, not
+/// world space — a front pinned in world space would be dragged inward by the
+/// retreat and shrink to a dot however fast it grew.
+static inline float mycelialField(float2 p, float drift, float time,
+                                  float breathWave, float tap,
+                                  thread float &detail) {
+    p *= 1.0 + breathWave * 0.03;
+
+    // ── The front, computed first ──────────────────────────────────────────
+    // Deliberately ahead of the field itself. Everything below costs two full
+    // evaluations of the mat, and outside the colony all of it would be
+    // multiplied by zero — so the mask is worked out first and the whole thing
+    // skipped where it can't show. During the blob phase that is most of the
+    // screen, which is exactly when the two-layer cost would otherwise be
+    // hardest to afford.
+    float front = mix(COLONY_START, COLONY_SETTLE,
+                      smoothstep(0.0, COLONY_SPREAD_SECONDS, time));
+
+    // Ragged, and ragged differently as it goes, so the margin advances in
+    // lobes and tendrils instead of as an expanding circle.
+    //
+    // Sampled on the unit circle rather than from atan2: an angle taken
+    // straight out of atan2 jumps a full turn across the negative x-axis, and
+    // any noise driven by it leaves a hard seam down that line. That exact bug
+    // shipped once already in an earlier version of this form.
+    float r = length(p);
+    float2 ring = (r > 1e-5) ? p / r : float2(1.0, 0.0);
+    float lobes = fbm3(ring * 2.6 + float2(drift * 0.030, drift * 0.021));
+    front *= 0.58 + 0.80 * lobes;
+
+    // Then break the radius up in two dimensions as well as around the ring.
+    // Ring noise alone only ever yields a wobbly circle: every point at a given
+    // angle advances together, so the boundary stays one closed curve however
+    // irregular it is. Perturbing the radius itself is what lets filaments run
+    // out ahead of the front and small islands break off it.
+    float rough = fbm3(p * 11.0 + float2(drift * 0.020, -drift * 0.015)) - 0.5;
+    float rEff = r + rough * front * 0.42;
+
+    // Narrow band. A wide one faded the mat out over a third of its radius and
+    // the result read as a cotton ball with a halo rather than as a margin.
+    float edge = 1.0 - smoothstep(front * 0.88, front, rEff);
+    if (edge <= 0.0) {
+        detail = 0.0;
+        return 0.0;
+    }
+
+    // ── The mat ────────────────────────────────────────────────────────────
+    // A tap drives the churn forward, so the whole network visibly reorganises
+    // rather than only brightening.
+    float churn = drift * 0.05 + tap * 1.2;
+
+    // Driven by raw elapsed time rather than `drift`, which carries the session
+    // seed and is slowed by grounding. Growth wants to be the one thing in the
+    // field that is the same every session and never stops.
+    float k = fract(time * MYCELIAL_GROW_RATE);
+
+    float dNear = 0.0, dFar = 0.0;
+    float webNear = mycelialLayer(p * exp2(k),       drift, churn, dNear);
+    float webFar  = mycelialLayer(p * exp2(k - 1.0), drift, churn, dFar);
+
+    // Linear, not smoothstep — the same finding as the kaleidoscope. A
+    // smoothstep dissolves quickly through the middle of the octave, and that
+    // burst of dissolve is itself an event you can see and time.
+    float web = mix(webNear, webFar, k);
+    detail    = mix(dNear,   dFar,   k) * edge;
+
     // No offset: empty space lands at exactly t = 0, which the mycelial
     // palettes render as black.
-    return web * 1.15;
+    return web * 1.15 * edge;
 }
 
 // MARK: - Field pass
@@ -467,7 +576,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     } else if (form == FORM_WEAVE) {
         t = weaveField(p, drift, breathWave, detail);
     } else {
-        t = mycelialField(p, drift, breathWave, tap, detail);
+        t = mycelialField(p, drift, time, breathWave, tap, detail);
     }
 
     // Both gestures shift hue as well as brightness, so a touch reads as a
@@ -512,14 +621,22 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // Tuned by eye against the simulator: much above ~0.55 and both the fresh
     // structure and a new bloom drown in their own history.
     //
-    // On the kaleidoscope the contraction is locked to the zoom rate rather
-    // than left at a fixed 0.998. A fixed value drifts the trail outward at
-    // ~11%/s against a field zooming at ~4%/s, and a ghost travelling 3x faster
-    // than the thing casting it doesn't read as motion — it reads as blur, and
-    // it buries the zoom entirely. Matched, the history lands exactly where the
-    // pattern is going and the whole frame moves as one.
+    // On the two zooming forms the contraction is locked to the zoom rate
+    // rather than left at a fixed 0.998. A fixed value drifts the trail outward
+    // at ~11%/s against a field zooming at ~4%/s, and a ghost travelling 3x
+    // faster than the thing casting it doesn't read as motion — it reads as
+    // blur, and it buries the zoom entirely. Matched, the history lands exactly
+    // where the pattern is going and the whole frame moves as one.
+    //
+    // The signs are opposite because the forms move opposite ways. Under 1 the
+    // history is sampled inward and so drifts outward, which is where the
+    // kaleidoscope is going as it magnifies. Mycelial retreats instead —
+    // everything on screen travels inward — so its history has to travel inward
+    // with it, and that needs a factor above 1.
     float dt = max(u.holdParams.z, 1.0 / 240.0);
-    float fbContract = (form == FORM_KALEIDOSCOPE) ? exp2(-ZOOM_RATE * dt) : 0.998;
+    float fbContract = 0.998;
+    if (form == FORM_KALEIDOSCOPE)   fbContract = exp2(-KALEIDO_ZOOM_RATE * dt);
+    else if (form == FORM_MYCELIAL)  fbContract = exp2( MYCELIAL_GROW_RATE * dt);
     float2 fbUV = (uv - 0.5) * fbContract + 0.5;
     float3 history = prev.sample(smp, fbUV).rgb;
     // Lattice and weave live or die on hard edges, and heavy feedback is
