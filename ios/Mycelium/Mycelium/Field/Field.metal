@@ -2,10 +2,12 @@
 //  Field.metal
 //  The living surface. Everything the user stares into is computed here.
 //
-//  Two passes:
+//  Four kinds of pass:
 //    1. fieldFragment  — the selected Form + touch blooms, blended with the
 //                        previous frame so strokes persist and get woven in.
-//    2. presentFragment — tonemap the accumulation buffer to the drawable.
+//    2. bloomBrightFragment — pull out only what is brighter than white.
+//    3. bloomBlurFragment   — separable gaussian, run twice at two spacings.
+//    4. presentFragment     — add the glow back, set the black point, tonemap.
 //
 //  Forms are branches inside fieldFragment. They share the bloom math, the
 //  palette, the breath, and the grounding treatment; they differ only in how
@@ -16,7 +18,9 @@
 //    - No strobe. Every animated term is a slow sine or an exponential decay.
 //      There is no path through this shader that produces a hard flash.
 //    - Luminance is soft-clamped in the present pass, so a pile of overlapping
-//      blooms brightens the field but can never blow out to white.
+//      blooms brightens the field but can never blow out to white. Individual
+//      sources are now *allowed* past white — see the bloom pass — but the
+//      rolloff is what stops the screen as a whole from following them.
 //
 
 #include <metal_stdlib>
@@ -246,6 +250,20 @@ constant float MARGIN_LINE = 0.80;
 constant float MAT_CELL  = 0.72;
 constant float MAT_GAMMA = 1.55;
 
+/// How far past white a growing tip is allowed to go. This form measured at
+/// 70% near-black and *zero* pixels above 200/255 — dark, which is right, and
+/// with nothing bright in it at all, which is why it read as flat no matter how
+/// the palette moved. The reference frames are the same deep black with 1.5–2%
+/// of the pixels genuinely blown out, and that small bright fraction is doing
+/// most of the work.
+///
+/// Tips are the right thing to spend it on: they are already the subject of the
+/// form, they are a cord-width across so the lit area stays tiny, and they fade
+/// as `age` passes AGE_TIP — so a settled colony has no hot spots left and the
+/// screen doesn't slowly accumulate brightness. `front` peaks at 1, so this is
+/// the multiple of white a brand-new tip reaches.
+constant float MAT_TIP_HEAT = 3.2;
+
 /// Tunnel geometry. COLUMNS is how many beads go around the corridor and
 /// **must stay a whole number** — theta wraps at the negative x-axis and the
 /// column coordinate jumps by exactly this there, so an integer lands back on
@@ -302,18 +320,74 @@ constant float TUNNEL_CYL = 0.65;
 /// modulation, which is the one thing this shader must never do. WAVE is in
 /// cycles per row and DRIFT is radians per second, so a fixed point sees
 /// DRIFT/TAU = 0.09 Hz. Two orders of magnitude below the photosensitive band.
+///
+/// FLOOR was 0.07 and is now zero, which is a reversal worth writing down. The
+/// floor came from a direct request — the gaps should glow and pulse rather
+/// than be black — and it did that, but a floor is a floor everywhere, so the
+/// corridor came out as a lit grey room with beads in it. Measured against the
+/// reference the difference was stark: 67% of that frame is near-black and
+/// 2.2% is genuinely blown out, and ours had 26% near-black and *zero* pixels
+/// above 200/255. The glow was there. The dark it needs to sit against wasn't.
+///
+/// So the pulse survives and the floor doesn't. SHARP raises the wave to a
+/// power, which pins the troughs at zero and narrows the peak into a band, and
+/// SWING nearly doubles to pay for the narrowing. Brighter than it ever was,
+/// over less of the corridor, against black.
 constant float TUNNEL_GAP_WAVE  = 1.9;
 constant float TUNNEL_GAP_DRIFT = 0.58;
-constant float TUNNEL_GAP_FLOOR = 0.07;   // the mortar is never black
-constant float TUNNEL_GAP_SWING = 0.84;
+constant float TUNNEL_GAP_FLOOR = 0.0;    // and now it really is black
+constant float TUNNEL_GAP_SWING = 1.55;
+constant float TUNNEL_GAP_SHARP = 3.0;
+
+/// …and how the bright band gets to be bright, which took one wrong turn to
+/// find. Removing the floor put the mortar's brightness into `t`, and `t` is a
+/// palette coordinate — so a bright band was a band FURTHER ALONG THE RAMP, at
+/// 0.43 of it, which in these palettes is cream. Gaps came out pale exactly
+/// where the light was strongest. The corridor was black in the shadowed
+/// sectors and a white wash in the lit ones, which is worse than the floor it
+/// replaced and for the same underlying reason: brightness had again been
+/// spelled as colour.
+///
+/// So the band barely moves `t` — it stays down at the dark end of the ramp
+/// with the rest of the corridor — and it goes into `shade` instead, which
+/// multiplies after the palette and has no ceiling. The result is a saturated
+/// dark colour turned up past white rather than a pale one: an emitting seam,
+/// which is what the reference has and what a lighter grey can never be.
+///
+/// 1.6 puts the peak of the band at ~3.5x white, so the bloom pass carries it.
+constant float TUNNEL_GAP_GLOW = 1.6;
+
+/// The hot core at the vanishing point. STRENGTH multiplies `shade`, so 3.4
+/// puts the middle of the corridor at over four times white — carried by the
+/// float accumulation buffer instead of clipped, and picked up by the bloom
+/// pass, which is the entire point of it. TIGHT is the falloff: 420 makes the
+/// core about 0.05 field units across, roughly 5% of screen height.
+///
+/// Tiny on purpose, and the reason is in the note by `depth`. This form's
+/// history is sampled slightly inward every frame, so anything broad at the
+/// centre gets dragged outward across the whole screen and re-added as fog. A
+/// core this small has no wide tail to drag and its trail is gone in three
+/// frames.
+constant float TUNNEL_CORE       = 3.4;
+constant float TUNNEL_CORE_TIGHT = 420.0;
 
 /// Rows per second of travel. **This is a safety constant, not a taste one.**
 /// Bright tiles sweeping outward past dark gaps is periodic whole-field
 /// luminance modulation at exactly one cycle per row — so this number, in rows
 /// per second, is a flicker frequency in Hz. The photosensitive band starts
-/// around 3Hz. 0.30 keeps it an order of magnitude clear of it and reads as a
-/// drift rather than a ride. Do not raise it into single digits.
-constant float TUNNEL_SPEED = 0.30;
+/// around 3Hz. Do not raise it into single digits.
+///
+/// 0.30 was picked as "obviously safe" without anything to check it against,
+/// and it was too slow: at that rate the corridor drifts rather than travels,
+/// which is most of why this form read as marbles turning instead of as a ride.
+///
+/// 0.62 is measured. Fitting a similarity transform between successive frames
+/// of the reference clip gives it travelling at 0.145–0.335 log-radius per
+/// second; ours was 0.096. Dividing by TUNNEL_ROW puts the reference at
+/// 0.45–1.05 rows per second, and 0.62 sits in the middle of that. It is still
+/// nearly five times clear of 3Hz — the headroom was never the constraint, the
+/// absence of a number to aim at was.
+constant float TUNNEL_SPEED = 0.62;
 
 /// How far the rings wind into spiral arms. Swept through zero by a slow sine,
 /// so the form passes through concentric rings and out the other side into
@@ -362,8 +436,13 @@ constant float TUNNEL_LOBE_A = 0.026;  // and how much they lean side to side
 /// it multiplies the raw angle, which jumps a full turn at the negative x-axis.
 ///
 /// It runs at 0.55 / 1.8 = 0.31 log-radius per second against the beads' own
-/// 0.096, so the wave visibly overtakes them: the corridor flexes and the beads
-/// ride it rather than the whole lattice sliding as one piece.
+/// 0.198, so the wave still overtakes them and the corridor flexes rather than
+/// the whole lattice sliding as one piece — but by 1.6x now rather than 3.2x,
+/// since the beads sped up and this didn't. That is the right side to lose the
+/// margin on: this is the one thing left that is *supposed* to move against the
+/// travel, and a flex that outruns the corridor threefold reads as the corridor
+/// wobbling. If the wave stops reading at all, raise RATE rather than cutting
+/// TUNNEL_SPEED, which has a measurement behind it and this doesn't.
 constant float TUNNEL_WAVE_A    = 0.090;
 constant float TUNNEL_WAVE_K    = 1.80;
 constant float TUNNEL_WAVE_RATE = 0.55;
@@ -381,18 +460,26 @@ constant float TUNNEL_WAVE_TILT = 2.0;
 /// So the palette coordinate is a function of position only: a logarithmic
 /// spiral, which in log-polar coordinates is just a straight line, so it costs
 /// one sine. SPIRAL_A is how many arms and **must be a whole number** for the
-/// same seam reason as everything else driven off the raw angle. RATE is in
-/// cycles per second and travels outward at 0.055 log-radius per second —
-/// deliberately slower than the beads' 0.096, so they slide through it.
+/// same seam reason as everything else driven off the raw angle.
 ///
-/// Both numbers are low on purpose. They set how much palette a SINGLE BEAD
-/// spans, and a bead that spans much of the ramp is a rainbow again however the
-/// colour got there. At 0.32 and one arm a bead crosses about a sixth of the
-/// ramp from its position, which leaves room for the reflection below to be the
-/// thing that moves colour across its face — which is the point.
+/// **The colour is painted on the corridor and travels with it.** There used to
+/// be a RATE constant here giving the spiral its own outward speed, slower than
+/// the beads', so the two slid against each other. That is a defensible thing
+/// for a light to do and it is not what this form is: two things drifting past
+/// each other at similar speeds reads as neither of them moving, just as
+/// churning. Locked to the beads instead, the colour is a property of the
+/// corridor — the walls are painted, and what changes the colour is that you
+/// are travelling through it. Everything on screen now moves as one piece, and
+/// the form finally has a direction.
+///
+/// SPIRAL_R is low on purpose. It sets how much palette a SINGLE BEAD spans,
+/// and a bead that spans much of the ramp is a rainbow again however the colour
+/// got there. At 0.32 and one arm a bead crosses about a sixth of the ramp,
+/// which leaves the sectors big enough to read as regions of colour rather than
+/// as a gradient — which is what the reference has and what a fine spiral
+/// never gave us.
 constant float TUNNEL_SPIRAL_R    = 0.32;   // colour cycles per unit log-radius
 constant float TUNNEL_SPIRAL_A    = 1.0;    // arms
-constant float TUNNEL_SPIRAL_RATE = 0.030;  // cycles per second, outward
 
 /// **Nothing per bead touches `t` at all any more, and that is the point.**
 ///
@@ -813,10 +900,15 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // here has twice come out as a rainbow on every bead.
     //
     // Built from `lrRoom`, the log-radius from before the wave and the lobes
-    // bent it, so the light stays a clean arm while the lattice flexes
+    // bent it, so the colour stays clean sectors while the lattice flexes
     // underneath it rather than pumping along with the rows.
-    float lightPhase = TAU * (lrRoom * TUNNEL_SPIRAL_R
-                              - drift * TUNNEL_SPIRAL_RATE)
+    //
+    // The travel term is the beads' own — TUNNEL_ROW * TUNNEL_SPEED is their
+    // speed in log-radius per second, and this is exactly that. So the colour
+    // does not drift against the corridor at all; it IS the corridor, and it
+    // arrives because you're moving. See TUNNEL_SPIRAL_R.
+    float lrTravel = lrRoom - drift * TUNNEL_SPEED * TUNNEL_ROW;
+    float lightPhase = TAU * lrTravel * TUNNEL_SPIRAL_R
                      + a * TUNNEL_SPIRAL_A;
     float spiral = 0.5 + 0.5 * sin(lightPhase);
 
@@ -831,12 +923,14 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
 
     // ── The mortar ─────────────────────────────────────────────────────────
     // Beads overlap, so what's left is small curved triangles rather than a
-    // grid of lines. They used to land at t = 0, which the tunnel palettes
-    // render as black — correct for depth, and dead. Lit instead, with a wave
-    // running down the corridor: see the constants for why it travels rather
-    // than blinks.
+    // grid of lines. Three versions: unlit, which put them at t = 0 and read as
+    // dead; then a uniform glow with a wave over it, which lit them but lit
+    // them *everywhere* and turned the corridor into a grey room; and now a
+    // wave with no floor under it, so the gaps are black except where the band
+    // is passing. See TUNNEL_GAP_FLOOR for the measurement that settled it.
     float gap = 1.0 - bead;
     float pulse = 0.5 + 0.5 * sin(rows * TUNNEL_GAP_WAVE - drift * TUNNEL_GAP_DRIFT);
+    pulse = pow(pulse, TUNNEL_GAP_SHARP);
     float mortar = gap * (TUNNEL_GAP_FLOOR + TUNNEL_GAP_SWING * pulse);
 
     // Distance, as brightness rather than as a hole. Smooth and unbounded
@@ -849,6 +943,13 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // across the whole screen and re-added. A centre glow that looks modest in
     // one frame comes back as a pale fog over everything a few seconds later.
     float depth = 1.0 / (1.0 + r * 11.0);
+
+    // And the thing `depth` was never allowed to be. Same idea — brightness
+    // toward the middle — but a hundredth of the area, which is what buys it
+    // permission to be forty times stronger. It goes into `shade` rather than
+    // into `t`, so it is a light and not a colour, and it is the first thing in
+    // this shader deliberately allowed past white. See TUNNEL_CORE.
+    float hot = 1.0 / (1.0 + r * r * TUNNEL_CORE_TIGHT);
 
     // `env` and `depth` are both kept lean, and for the same reason: this
     // form's history is sampled slightly inward every frame, so any broad
@@ -868,16 +969,27 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // it nudges the hue slightly, and it cannot blow out. That bound is the
     // whole reason it is the right channel for this.
     detail = clamp(s1 * 1.25 + s2 * 0.95 + rim * 0.60 + env * 0.60
-                   + depth * 0.30 + mortar * 0.22, 0.0, 1.0);
+                   + depth * 0.30 + mortar * 0.16, 0.0, 1.0);
 
     // Only the beads are shaded. The mortar is a light source, not a surface,
     // so it keeps its own brightness.
     //
     // Both multiplied by the travelling light. `shade` is applied after the
     // palette, so this is the one place the light can change how bright things
-    // are without dragging their colour anywhere. It stays near 1 — see the
-    // note above for what happens when it doesn't.
-    shade = mix(1.0, lit, bead) * lightLift;
+    // are without dragging their colour anywhere.
+    //
+    // It stays near 1 everywhere except the core, and the difference between
+    // that and the highlights that used to live here is spatial: four glints on
+    // every bead at 3x white is the whole screen over white, which the contrast
+    // curve and the tonemap each clip at a different point, and what comes out
+    // is rainbow spikes. One spot 5% of the screen across at 4x white is a
+    // light. The clipping was never about the magnitude.
+    // Two emitters in here now, and neither is a surface. The core is one; the
+    // mortar band is the other, and it lands on `shade` for the same reason —
+    // see TUNNEL_GAP_GLOW for the pale-gaps detour that established it.
+    shade = mix(1.0, lit, bead)
+          * lightLift
+          * (1.0 + TUNNEL_CORE * hot + TUNNEL_GAP_GLOW * mortar);
 
     // Hue dominates `t` and the body shading stays out of it. That split
     // matters more than it looks: `t` is the palette coordinate, so anything
@@ -892,9 +1004,23 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // colours — which is the one thing that says glass.
     // Every weight here is a move along the palette, and there are almost none
     // left. A bead's colour is the light's colour where it sits, full stop.
-    return bead * (0.14 + 0.86 * spiral)
-         + mortar * 0.26
-         + depth * 0.08;
+    //
+    // The mortar is now inside that same bracket rather than added beside it,
+    // and the change is not cosmetic. Added beside, a gap band had a hue of its
+    // own — a fixed 0.26 along the ramp regardless of where the arm was — so at
+    // the new SWING it would have swept half the palette on its own and come
+    // back striped, which is the third time this form would have found that
+    // particular wall. Inside, the mortar is lit BY the spiral like everything
+    // else: the gaps come up when the arm crosses them and are black when it
+    // has gone. Which is also the honest reading of what he asked for — the
+    // colour comes out of the middle, and the gaps are part of what it reaches.
+    // The mortar's weight here is small and stays small. It exists only so the
+    // gaps sit in the same family of colour as the corridor around them rather
+    // than at a flat t = 0; everything that makes the band *bright* happens in
+    // `shade`. 0.12 puts its peak at 0.19 of the ramp, still in the dark end.
+    float lightT = 0.14 + 0.86 * spiral;
+    return (bead + mortar * 0.12) * lightT
+         + depth * 0.06;
 }
 
 /// Weave — Truchet tiling. Every cell holds two quarter-circle arcs, flipped
@@ -1310,7 +1436,7 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
 static inline float mycelialField(float2 p, float drift, float time,
                                   float breathWave, float tap,
                                   float grown, float push,
-                                  thread float &detail) {
+                                  thread float &detail, thread float &shade) {
     p *= 1.0 + breathWave * 0.03;
     p *= exp2(push);                  // a tap shoves the camera back
 
@@ -1393,6 +1519,17 @@ static inline float mycelialField(float2 p, float drift, float time,
 
     detail = clamp(core * 0.9 + dTex * (near * 0.45 + core * 0.5)
                    + front * 1.6, 0.0, 1.0);
+
+    // The tip, again, and this time as a light rather than as more material.
+    // Everything below goes into `t`, which is a palette coordinate — it can
+    // only move a tip's colour along the ramp, and the ramp tops out. `shade`
+    // multiplies after the palette and has no ceiling, so this is the only
+    // channel that can make a tip genuinely brighter than everything around it
+    // instead of merely a different colour from it. See MAT_TIP_HEAT.
+    //
+    // Left at the caller's 1.0 on both early returns above, which is correct:
+    // empty space is unlit, not unshaded.
+    shade = 1.0 + front * MAT_TIP_HEAT;
 
     float raw = (web * (1.05 + tip * 0.35) + front * MARGIN_LINE) * quiet;
 
@@ -1490,7 +1627,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
         t = weaveField(p, drift, breathWave, detail);
     } else {
         t = mycelialField(p, drift, time, breathWave, tap,
-                          u.colony.x, u.colony.y, detail);
+                          u.colony.x, u.colony.y, detail, shade);
     }
 
     // Both gestures shift hue as well as brightness, so a touch reads as a
@@ -1514,7 +1651,20 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // Contrast. The old field sat in the middle of its range and read washed
     // out; this pushes darks down and lets the bright structure separate.
-    col = col * col * (3.0 - 2.0 * col);
+    //
+    // Split at white, and it has to be. `col*col*(3-2col)` is smoothstep's
+    // polynomial, which is only monotonic on [0,1] — it turns over at 1, hits
+    // zero again at 1.5 and goes NEGATIVE past that. Every value in this shader
+    // used to be under 1 so it never came up, and the moment anything is
+    // allowed to be a light source it becomes a silent catastrophe: the
+    // brightest pixel on screen renders black, and the ring around it renders
+    // as a hard band on the way there.
+    //
+    // Below white the curve is untouched, bit for bit. Above it, the excess
+    // passes straight through, so the function is continuous, monotone, and
+    // still exactly the old contrast curve everywhere the old field lived.
+    float3 lo = min(col, 1.0);
+    col = lo * lo * (3.0 - 2.0 * lo) + max(col - 1.0, 0.0);
 
     // A tap lifts the whole field toward the warm end of the palette. No
     // falloff, no centre — the same everywhere on screen, by design.
@@ -1602,22 +1752,149 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     return float4(col, 1.0);
 }
 
+// ── Bloom ──────────────────────────────────────────────────────────────────
+//
+// Every form measured the same way and it was the most useful number this
+// project has produced: across three reference clips, 1.5–2.2% of pixels are
+// genuinely blown out and 10–67% are near-black. Across all four of our forms,
+// *zero* pixels were above 200/255. Not "few" — none, in any frame of any form.
+// The accumulation buffer has been rgba16Float from the first commit precisely
+// so brightness could exceed 1, and nothing had ever put anything there.
+//
+// So two changes, and they only work as a pair. Sources are now allowed past
+// white (TUNNEL_CORE, MAT_TIP_HEAT), and this pass spreads what's up there into
+// the pixels around it — which is what a real camera does with a real light and
+// what the eye reads as "that thing is emitting," as opposed to "that thing is
+// a pale colour." A hot pixel with hard edges is just a white dot.
+//
+// Cost is close to free and worth understanding why. The bright pass halves the
+// field buffer twice on the way in, so all five passes here run at 1/16 of the
+// field's already-reduced pixel count — together about a third of one field
+// pass, at a fraction of its per-pixel cost. Bloom is the cheapest visual
+// upgrade available to this app, and it is the only one that improves all four
+// forms at once.
+
+/// Five linear taps standing in for a nine-tap gaussian: the offsets are
+/// weighted midpoints between adjacent texels, so hardware bilinear filtering
+/// fetches two samples for the price of one. Standard sigma-2 coefficients.
+constant float BLUR_OFFSET[3] = { 0.0, 1.3846153846, 3.2307692308 };
+constant float BLUR_WEIGHT[3] = { 0.2270270270, 0.3162162162, 0.0702702703 };
+
+/// Where white starts, for the purposes of glowing. Not 1.0, deliberately:
+/// structure sitting just under white should carry a faint halo or the effect
+/// only ever shows up on the two forms that have a designated hot spot. The
+/// squared knee below is what keeps that from becoming fog — at 0.8 a pixel
+/// contributes 2% of itself, at 4.0 it contributes 76%.
+constant float BLOOM_THRESHOLD = 0.58;
+
+/// How much of the blurred result is added back. Above ~1.3 the glow starts
+/// reading as a dirty lens rather than as light.
+constant float BLOOM_STRENGTH = 0.60;
+
+/// Black point, applied after the glow is added and before the tonemap.
+///
+/// This replaces a `pow(c, 0.90)` that used to sit at the end of this function
+/// lifting the shadows, on the reasoning that deep areas should keep some
+/// colour rather than crush out. That was the right instinct aimed at the wrong
+/// end: what it produced was a floor under the entire frame, so nothing was
+/// ever black and the contrast that makes a bright thing read as bright had
+/// nowhere to come from. The references get their depth from the bottom of the
+/// range, not the top.
+///
+/// Small — 4% — because it is a subtract, and everything below it is gone.
+constant float BLACK_POINT = 0.040;
+
+/// Bright pass. Downsamples 4x on the way in, which is where most of the
+/// saving is. The four taps sit one source texel out from the centre, and the
+/// centre of a 4x4 block is a texel *corner* — so each tap is a bilinear fetch
+/// straddling four texels, and the four of them tile the block exactly. Sixteen
+/// texels averaged, four fetches, no arithmetic.
+///
+/// Averaging *before* thresholding matters as much as the saving. Threshold
+/// first and a single hot pixel drifting across the field pops in and out of
+/// the glow frame by frame; average first and it fades.
+fragment float4 bloomBrightFragment(VertexOut in [[stage_in]],
+                                    texture2d<float> src [[texture(0)]],
+                                    sampler smp          [[sampler(0)]],
+                                    constant float4 &params [[buffer(0)]]) {
+    float2 o = params.xy;
+    float3 c = (src.sample(smp, in.uv + float2(-o.x, -o.y)).rgb +
+                src.sample(smp, in.uv + float2( o.x, -o.y)).rgb +
+                src.sample(smp, in.uv + float2(-o.x,  o.y)).rgb +
+                src.sample(smp, in.uv + float2( o.x,  o.y)).rgb) * 0.25;
+
+    // Keyed off the brightest channel, not off luminance. A saturated red at
+    // full blast has a luminance of 0.30 and is unmistakably a light; weighting
+    // by luminance would bloom the greens of the palette and leave the reds
+    // and blues flat, which is a colour cast rather than a glow.
+    float peak = max(max(c.r, c.g), c.b);
+
+    // Squared knee. `k` is the fraction of this pixel that is above the
+    // threshold, so k*k ramps in smoothly instead of switching on — a hard
+    // threshold makes the glow's edge crawl visibly as structure drifts across
+    // it, and on a form that is mostly slow drift that crawl is the only thing
+    // you'd look at.
+    float k = max(peak - BLOOM_THRESHOLD, 0.0) / max(peak, 1e-4);
+    return float4(c * k * k, 1.0);
+}
+
+/// One direction of the separable blur. `params.xy` is the tap spacing,
+/// `params.z` a gain applied once at the end of a chain.
+///
+/// Run four times: horizontal, vertical, then both again at wider spacing —
+/// and the second pair is *added* to the result of the first rather than
+/// replacing it. That distinction is the whole reason small bright things glow
+/// at all, and getting it wrong is invisible on anything big.
+///
+/// A gaussian conserves energy, so it spreads a source's brightness over its
+/// own area and the peak falls as roughly the square of how far it spread. A
+/// tunnel core a hundred pixels across barely notices. A mycelial tip three
+/// pixels across, blurred over thirty, keeps about 1% of its peak — which is
+/// nothing, and the tips came back with no halo at all. Chained, the wide pass
+/// blurs the tight pass's output and there is no tight component left anywhere.
+/// Summed, the tight scale survives at full strength underneath the wide one,
+/// and a three-pixel tip gets a three-pixel glow instead of no glow.
+fragment float4 bloomBlurFragment(VertexOut in [[stage_in]],
+                                  texture2d<float> src [[texture(0)]],
+                                  sampler smp          [[sampler(0)]],
+                                  constant float4 &params [[buffer(0)]]) {
+    float2 d = params.xy;
+    float3 c = src.sample(smp, in.uv).rgb * BLUR_WEIGHT[0];
+    for (int i = 1; i < 3; i++) {
+        float2 o = d * BLUR_OFFSET[i];
+        c += (src.sample(smp, in.uv + o).rgb +
+              src.sample(smp, in.uv - o).rgb) * BLUR_WEIGHT[i];
+    }
+    return float4(c * params.z, 1.0);
+}
+
 fragment float4 presentFragment(VertexOut in [[stage_in]],
-                                texture2d<float> src [[texture(0)]],
-                                sampler smp          [[sampler(0)]]) {
+                                texture2d<float> src   [[texture(0)]],
+                                texture2d<float> bloom [[texture(1)]],
+                                sampler smp            [[sampler(0)]]) {
     float3 c = src.sample(smp, in.uv).rgb;
+
+    // Added before the black point, not after, and that ordering is the whole
+    // difference between a glow and a haze. The far tail of the blur is a few
+    // percent of a light spread over a lot of screen; run through the subtract
+    // below it is simply gone, so the halo stays tight around what's actually
+    // emitting and the empty parts of the frame stay empty. Lift the blacks
+    // first and the same tail survives everywhere as a grey film.
+    c += bloom.sample(smp, in.uv).rgb * BLOOM_STRENGTH;
+
+    c = max(c - BLACK_POINT, 0.0) * (1.0 / (1.0 - BLACK_POINT));
 
     // Soft-clamp rather than hard clip: overlapping blooms can pile up
     // brightness, and this rolls it off instead of letting it flash white.
+    // It's also what keeps the new hot sources from taking the screen with
+    // them — a core at 4x white lands at 0.67 here, so it reads as bright
+    // while its surroundings are unaffected.
     c = c / (1.0 + c * 0.50);
 
     // Saturation lift. The tonemap desaturates as it rolls off, and the ask
     // was for rich color, so this puts back what the curve takes out.
     float lum = dot(c, float3(0.299, 0.587, 0.114));
     c = clamp(mix(float3(lum), c, 1.28), 0.0, 1.0);
-
-    // Mild lift so deep areas keep some color instead of crushing to black.
-    c = pow(max(c, 0.0), float3(0.90));
 
     return float4(c, 1.0);
 }

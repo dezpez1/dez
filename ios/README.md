@@ -250,7 +250,8 @@ Most of the feel lives in a handful of constants:
 | tunnel bead size | `TUNNEL_BEAD`, in column widths. Useful up to ~0.577; past 0.5 beads meet along flat contacts, which is what packed marbles do |
 | how deep the corridor looks | `TUNNEL_COLUMNS`. Fewer beads around means each is bigger *and* each row is taller in log-radius, so fewer rings fit before the vanishing point. 22 was a shaft; 17 is a bowl |
 | how 3D the beads read | `TUNNEL_AMBIENT` and the contact-shading `mix(1.0, 0.62, ...)`, both via the `shade` channel. See below — this cannot go through `t` |
-| tunnel mortar glow | `TUNNEL_GAP_WAVE` / `TUNNEL_GAP_DRIFT` (the travelling pulse) and `TUNNEL_GAP_FLOOR` / `TUNNEL_GAP_SWING` (how dark it gets and how far it swings) |
+| tunnel mortar glow | `TUNNEL_GAP_WAVE` / `TUNNEL_GAP_DRIFT` (the travelling pulse), `TUNNEL_GAP_SWING` / `TUNNEL_GAP_SHARP` (how bright the band is and how narrow), `TUNNEL_GAP_GLOW` (how far past white it goes). `TUNNEL_GAP_FLOOR` is 0 and should stay there — see *Nothing in this app was ever bright* |
+| how bright anything gets | `BLOOM_THRESHOLD` / `BLOOM_STRENGTH` / `BLACK_POINT` in the present pass, and the three emitters: `TUNNEL_CORE`, `TUNNEL_GAP_GLOW`, `MAT_TIP_HEAT` |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
 | edge crispness | `persistBase` — tunnel and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
 | mycelial cord weight | `0.22 + 0.16 * wr.x` — the noise term is what makes cords read as felted masses instead of drawn strokes |
@@ -753,7 +754,7 @@ stretch along the row axis: rows bunch up and spread apart as it passes and the
 beads keep the shape they had. Amplitude is therefore free in a way the lobes'
 never was, and `TUNNEL_WAVE_A * TUNNEL_WAVE_K` — the stretch, about a sixth — is
 the only thing bounding it. It runs at `RATE / K` = 0.31 log-radius per second
-against the beads' own 0.096, so it visibly overtakes them: the corridor flexes
+against the beads' own 0.198, so it still overtakes them: the corridor flexes
 and the beads ride it, rather than the whole lattice sliding as one piece.
 
 Once the wave was carrying the motion, every rotation rate came down by about
@@ -797,19 +798,26 @@ hue hash was replaced to stop, arriving by a different route. It got there first
 through `TUNNEL_REFLECT` at 1.55, then through the two speculars at nearly a
 quarter of the ramp each.
 
-So the colour is purely **emitted** now. There is a light at the vanishing point
-whose colour changes, and it travels outward:
+So the colour is purely **emitted** now — and it is painted on the corridor
+rather than sliding through it:
 
 ```metal
-float lightPhase = TAU * (lrRoom * TUNNEL_SPIRAL_R - drift * TUNNEL_SPIRAL_RATE)
-                 + a * TUNNEL_SPIRAL_A;
+float lrTravel   = lrRoom - drift * TUNNEL_SPEED * TUNNEL_ROW;   // the beads' own speed
+float lightPhase = TAU * lrTravel * TUNNEL_SPIRAL_R + a * TUNNEL_SPIRAL_A;
 float spiral    = 0.5 + 0.5 * sin(lightPhase);
 float lightLift = 1.0 + TUNNEL_LIGHT * sin(lightPhase - 1.5708);
 ```
 
 A function of position and time and **nothing else** — no hash, no cell index, no
-surface normal. Every bead in a ring shares a colour and the colour marches out
-through them. `lightLift` is the same wave a quarter turn ahead, carried on
+surface normal. Every bead in a ring shares a colour.
+
+The travel term used to be the spiral's own, slightly slower than the beads', so
+the two slid against each other. That is a defensible thing for a light to do
+and it was the wrong thing here: two things drifting past each other at similar
+speeds reads as neither of them moving, only as churning. Locked to the beads,
+the colour is a property of the corridor — the walls are painted, and what
+changes the colour is that *you are travelling through it*. Everything on screen
+moves as one piece and the form finally has a direction. `lightLift` is the same wave a quarter turn ahead, carried on
 `shade`, so the leading edge of an arm is the bright part; that is what makes it
 read as a *light* rather than as a tint. It's built from `lrRoom`, the log-radius
 from before the wave and the lobes bent it, so the arm stays clean while the
@@ -867,8 +875,17 @@ seconds later.
 
 Bright beads sweeping past dark mortar is periodic whole-field luminance
 modulation at one cycle per row, so the travel rate in rows per second is a
-flicker frequency in Hz. The photosensitive band starts around 3Hz. At 0.30
-rows/sec the form sits an order of magnitude clear of it.
+flicker frequency in Hz. The photosensitive band starts around 3Hz. At 0.62
+rows/sec the form sits nearly five times clear of it.
+
+0.62 is the first number here with a measurement behind it. 0.30 was picked as
+obviously-safe with nothing to check it against, and it was too slow — at that
+rate the corridor drifts rather than travels, which is most of why the form read
+as marbles turning instead of as a ride. Fitting a similarity transform between
+successive frames of the reference clip puts it at 0.145–0.335 log-radius per
+second against our 0.096; dividing by `TUNNEL_ROW` gives 0.45–1.05 rows per
+second, and 0.62 is the middle of that. **The headroom was never the constraint.
+The absence of a number to aim at was.**
 
 The mortar glow added later is a second animated term and is safe for a
 different reason: it is a **travelling** wave, not a blink. `TUNNEL_GAP_WAVE`
@@ -905,6 +922,97 @@ leaves hard seams down the mirror lines — a discontinuity through the center
 and straight edges radiating out. The angle gets lifted by `TAU` first for
 exactly this reason. If you touch that fold, check it full-screen: the bug is
 nearly invisible in a small preview tile.
+
+### Nothing in this app was ever bright
+
+The single most useful measurement this project has produced, and it took
+looking at reference footage frame by frame to notice, because on its own the
+app looked fine.
+
+Take three reference clips and our own four forms, convert to greyscale, and
+count two numbers: what fraction of pixels is near-black, and what fraction is
+genuinely blown out.
+
+| | near-black | blown out (>200/255) |
+|---|---|---|
+| reference — tunnel | 67.5% | 2.2% |
+| reference — petals | 10–36% | 1.5–2.2% |
+| ours — tunnel | 25.8% | **0.0%** |
+| ours — mycelial | 70.5% | **0.0%** |
+
+Not "few". **None**, in any frame of any form. The accumulation buffer had been
+`rgba16Float` since the first commit specifically so brightness could exceed 1,
+and in nine months nothing had ever put anything there. Every form lived
+entirely in the midtones, and every attempt to fix "it looks flat" had been an
+attempt to fix it with *colour* — because `t`, the palette coordinate, is the
+channel everything reached for, and a palette has no values above white in it.
+You cannot spell "bright" in a coordinate whose range is a hue.
+
+So: sources are allowed past white now (`TUNNEL_CORE`, `TUNNEL_GAP_GLOW`,
+`MAT_TIP_HEAT`), a bloom pass spreads what's up there into its neighbours, and
+the shadow lift at the end of `presentFragment` was replaced with a black point.
+Those are one change, not three. Overbright with no bloom is a white dot with
+hard edges; bloom with nothing overbright is a haze; and either one over lifted
+shadows has no dark to be bright against.
+
+#### Brightness is not a colour, and this is the third time
+
+Removing the mortar's brightness floor put its glow into `t`, so a bright band
+became a band *further along the palette* — 0.43 of the way, which in these
+palettes is cream. The corridor came out black in the shadowed sectors and a
+pale wash in the lit ones, which is worse than the floor it replaced.
+
+That is the same mistake as the per-bead hue hash and the per-bead reflection
+before it, arriving from a third direction. `t` moves colour. `shade` multiplies
+after the palette and has no ceiling. A bright thing goes in `shade`, always,
+and the tell that you have it backwards is that the bright thing is also a
+*different colour* from its surroundings rather than a brighter version of them.
+
+The fix is worth stating positively, because it is now the pattern for every
+emitter in the app: keep `t` low so the object sits in the dark end of the ramp
+with everything around it, and put all of the brightness in `shade`. A saturated
+dark colour multiplied past white is an emitting object. A pale colour is a pale
+object.
+
+#### A gaussian of a gaussian is not two gaussians
+
+The bloom runs two blur scales, tight and wide, because light doesn't have one
+size — a hard core inside a broad faint halo is most of what makes something
+read as emitting. The obvious implementation is to run the separable blur twice
+at different tap spacings, ping-ponging between two textures.
+
+That is wrong, and it is invisible on anything large. Chained, the wide pass
+consumes the tight pass's output, so there is no tight component left anywhere
+in the result — you get one wide gaussian and a slightly misleading comment. It
+looked correct on the tunnel, whose core is a hundred pixels across and barely
+notices being spread.
+
+It fails completely on small sources, and the reason is energy. A gaussian
+conserves total brightness, so it spreads a source over its own area and the
+peak drops as roughly the square of how far it spread. A mycelial tip is three
+pixels across; blurred over thirty it keeps about 1% of its peak. The tips had
+`MAT_TIP_HEAT` on them, they were rendering at over three times white, and they
+had no halo at all.
+
+Summed, the tight scale survives underneath the wide one at full strength and a
+three-pixel tip gets a three-pixel glow. That needs a third bloom texture and
+one extra pipeline with additive blending — the wide vertical pass draws onto
+the tight result with `.load` and one/one blend factors, which is also the only
+pass in the chain that must not use `loadAction = .dontCare`.
+
+#### And the curve that would have silently eaten it
+
+`col * col * (3 - 2 * col)` is smoothstep's polynomial. It is monotonic on
+`[0,1]`, turns over at 1, returns to zero at 1.5, and goes **negative** past
+that. It had been the contrast curve since the first commit and it was always
+safe, because until this change nothing in the shader ever exceeded 1.
+
+The moment anything is allowed to be a light source it becomes a trap that
+points the wrong way: the brightest pixel on screen renders *black*, ringed by a
+hard band on the way there. It is now split at white — the polynomial below,
+pass-through above — which is bit-for-bit the old curve everywhere the old field
+lived. **Any future curve applied to `col` needs the same check.** The question
+to ask is not "is this a nice shape" but "what does it do at 4?"
 
 ## Performance
 
@@ -944,6 +1052,23 @@ the tunnel's anti-aliasing starts lying about how big a pixel is.
 
 Not measured on device — the simulator runs on the Mac's GPU and would report
 whatever it likes. These are counted reductions, not benchmarked ones.
+
+**The bloom chain is five extra passes and is close to free**, for a reason
+worth keeping in mind if you add more of them. The bright pass downsamples 4x on
+the way in, so all five run at a sixteenth of the field's already-reduced pixel
+count — together about a third of one field pass in fragments, and each one is
+five texture fetches against the field shader's hundreds of ALU ops.
+
+Blurring at a quarter rate is not a compromise, either. A gaussian's whole job
+is to throw detail away, so resolving it finely is paying for something you are
+about to discard; the only visible consequence is that the glow cannot have a
+hard edge, which is not a thing glows have. It also multiplies the reach for
+free — one texel of tap at that rate covers four field pixels, so the same five
+taps spread light four times as far.
+
+What this *does* add is encoder count: five per renderer per frame, and the
+picker screen runs four preview renderers at once. Twenty extra encoders a frame
+at 30fps is fine, but it is the number to watch if the picker ever grows.
 
 ## Not built yet
 
