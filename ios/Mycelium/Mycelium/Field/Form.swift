@@ -93,13 +93,17 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         // The one form that earns a full spectrum. Every other form here is
         // busy — a wide sweep on top of busy structure reads as noise, which is
         // why the kaleidoscope's palettes are so restrained. The tunnel is the
-        // opposite: large, smooth, well-separated tiles, and it can carry a
-        // rainbow across them without any of it turning to mud.
+        // opposite: large, smooth, well-separated beads, each holding one
+        // colour, and it can carry a rainbow across them without any of it
+        // turning to mud.
         //
         // Built like the mycelial set so `t = 0` is exactly black (a == b,
-        // d = 0.5). Here that isn't for empty space, it's for the mortar
-        // between tiles — the corridor only reads as depth if the gaps are
-        // genuinely dark.
+        // d = 0.5). That's not for empty space here — there isn't any — it's
+        // the floor of the mortar between beads. The gaps now carry a slow
+        // travelling glow rather than being dead black, and this is what makes
+        // that legible: the wave has somewhere genuinely dark to come up from,
+        // so it reads as light moving through the packing instead of as the
+        // whole surface changing brightness.
         //
         // The three channels are given slightly different frequencies rather
         // than a shared one plus phase offsets. That's what makes the hue keep
