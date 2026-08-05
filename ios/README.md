@@ -46,14 +46,14 @@ duplication and buys every combination being one worth shipping.
 | Form | |
 |---|---|
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
-| `lattice` | Two hexagonal grids at a small relative angle. What you see is the moiré between them, not either grid. Pure geometry, no noise anywhere. |
+| `tunnel` | A spiral corridor built in log-polar coordinates — a plain square grid in `(log r, theta)` comes back as this. Endless, seamless, and the cheapest form here. |
 | `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
 | `mycelial` | Two cellular nets — broad felted cords and a mid net — over a tangle of straight threads crossing at every angle. Built against a photograph of a real network. Starts as one blob and spreads while the camera retreats from it forever. |
 
 | Form | Palettes |
 |---|---|
 | `kaleidoscope` | Obsidian · Reef · Bone · Vespers |
-| `lattice` | Neon · Chrome · Ultraviolet · Signal |
+| `tunnel` | Prism · Neon · Oilslick · Vapor |
 | `weave` | Rust · Jade · Ash · Saffron |
 | `mycelial` | Spore · Fungal · Deep · Filament |
 
@@ -231,10 +231,12 @@ Most of the feel lives in a handful of constants:
 | how big the colony starts | `COLONY_START` — screen radius in field units, where the visible area is ~0.46 wide and 1.0 tall |
 | how far it spreads, and how long it takes | `COLONY_SETTLE` and `COLONY_SPREAD_SECONDS`. Settle is past the screen corners (~0.55), so at rest the mat covers the frame and only the ragged margin bares a corner |
 | how ragged the growing margin is | the ring `fbm3` at `2.6` sets the lobes; `rough * front * 0.42` sets the filaments and detached islands. **Both are needed**, see below |
-| lattice moiré scale | `split` in `latticeField` — the *relative* angle between the two grids. The interesting range is only about a tenth of a radian wide; outside it you get one screen-sized blob or invisible grain |
-| lattice fineness | `scale = 110.0` — how many grid periods fit on screen |
+| tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
+| tunnel tile count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW` |
+| tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways |
+| tunnel tile look | `TUNNEL_GAP`, `TUNNEL_ROUND`, `TUNNEL_BEVEL` — mortar, corner radius, how domed |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
-| edge crispness | `persistBase` — lattice and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
+| edge crispness | `persistBase` — tunnel and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
 | mycelial cord weight | `0.22 + 0.16 * wr.x` — the noise term is what makes cords read as felted masses instead of drawn strokes |
 | mycelial cell scale | the `7.0` and `17.0` frequencies. Roughly 15 coarse cells across a screen reads as a mat; 4 reads as a diagram |
 | thread density | `228.0 + 19.0 * fk` — spacing per direction. **Each layer needs its own**, see below |
@@ -385,6 +387,66 @@ The ring noise is sampled on the unit circle rather than from `atan2`. An angle
 taken straight out of `atan2` jumps a full turn across the negative x-axis, and
 any noise driven by it leaves a hard seam down that line — a bug that shipped
 once already in an earlier version of this form.
+
+### The tunnel, and why it's the cheap one
+
+Work in `(log r, theta)` instead of `(x, y)` and two things become true. A
+logarithmic spiral turns into a straight line, so an ordinary square grid in
+that space comes back to the screen as a spiral corridor. And zooming turns into
+*translation*.
+
+That second one is the whole point. The kaleidoscope and mycelial both pay
+double — two octaves rendered and cross-faded — to make their zoom endless. The
+tunnel needs none of it. Tiles just scroll out of an infinite integer grid,
+forever, and the distribution of tile sizes on screen never changes, so there's
+nothing to alias and nothing to hand off. It is by a distance the cheapest form
+in the app while looking like the most elaborate.
+
+Two constraints are structural rather than aesthetic:
+
+**`TUNNEL_COLUMNS` must be a whole number.** Theta wraps at the negative x-axis
+and the column coordinate jumps by exactly that value there. An integer jump
+lands back on the same point in the tiling and nothing shows; anything else
+leaves a hard seam down that line. The shear is free to be fractional — it
+multiplies the row coordinate, which doesn't jump.
+
+**Per-tile hue has the same constraint, and it's easy to miss.** Colour keyed to
+`cell.x` must cycle a whole number of times per turn — a multiple of
+`TAU / TUNNEL_COLUMNS` — or there's a *colour* seam down the wrap line even
+though the geometry is fine. Keying hue off the continuous angle instead avoids
+the seam but sweeps the colour straight through each tile, so every tile becomes
+its own little rainbow and the tiling stops reading as tiles at all.
+
+One split worth preserving: **hue dominates `t`, shading goes in `detail`.** `t`
+is the palette coordinate, so anything that moves it moves colour. The first
+version gave the tile's dome enough weight in `t` that shading swept the hue
+across each tile — same failure as above, arrived at from the other direction.
+
+#### On `TUNNEL_SPEED` and what has *not* been verified
+
+Bright tiles sweeping past dark mortar is periodic whole-field luminance
+modulation at one cycle per row, so the travel rate in rows per second is a
+flicker frequency in Hz. The photosensitive band starts around 3Hz. At 0.30
+rows/sec the form sits an order of magnitude clear of it.
+
+**That is a structural argument, not a measurement.** It rests on every animated
+term in `tunnelField` being slow: the row scroll at 0.30Hz, the twist sine at a
+180-second period, and the breath at 13 seconds. Nothing in the function
+oscillates faster. You can check that by reading it.
+
+An attempt to measure the luminance trace directly **failed and was abandoned**,
+for two reasons worth recording so nobody repeats it:
+
+- The simulator restores the previous scene rather than cold-launching, so
+  `simctl launch -form tunnel` repeatedly came up on a different form and the
+  captures were of the wrong thing. Two full runs were thrown away to this.
+- More fundamentally, `simctl io screenshot` samples at best around 2.8Hz. By
+  Nyquist that cannot see anything above ~1.4Hz, so **screenshot sampling can
+  never test the 3–60Hz band at all**, however clean the run.
+
+Verifying this properly needs an in-app luminance probe writing to a log, or
+real device frame capture. Until someone does that, treat the safety basis as
+the code-reading argument above.
 
 ### One trap worth knowing
 

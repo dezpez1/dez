@@ -30,14 +30,22 @@ struct Palette: Equatable, Sendable {
 enum Form: Int, CaseIterable, Identifiable, Sendable {
     case mycelial = 0
     case kaleidoscope = 1
-    case lattice = 2
+    case tunnel = 2
     case weave = 3
     // Next up, per the plan: liquid light.
     //
-    // `smoke` used to be case 0 — two-level domain-warped fbm. It was the first
-    // form built and the weakest: a wash with no structure, which read as
-    // washed-out no matter how much contrast went on top. Dropped rather than
-    // kept for completeness. It's in the history if it's ever wanted back.
+    // Two forms have been dropped rather than kept for completeness. Both are
+    // in the history if they're ever wanted back.
+    //
+    // `smoke` was case 0 — two-level domain-warped fbm. The first form built
+    // and the weakest: a wash with no structure, which read as washed-out no
+    // matter how much contrast went on top. Mycelial took its slot.
+    //
+    // `lattice` was case 2 — two hexagonal grids at a small relative angle,
+    // showing the moiré between them. Genuinely clever and pure geometry with
+    // no noise anywhere, but it and the tunnel wanted the same slot: hard-edged
+    // synthetic structure in electric colour. The tunnel does more with it, so
+    // the lattice went.
 
     var id: Int { rawValue }
 
@@ -45,7 +53,7 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .mycelial:     return "Mycelial"
         case .kaleidoscope: return "Kaleidoscope"
-        case .lattice:      return "Lattice"
+        case .tunnel:       return "Tunnel"
         case .weave:        return "Weave"
         }
     }
@@ -54,7 +62,7 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .mycelial:     return "a colony, reaching"
         case .kaleidoscope: return "fractal, sixfold"
-        case .lattice:      return "grids interfering"
+        case .tunnel:       return "a corridor, spiralling"
         case .weave:        return "one endless ribbon"
         }
     }
@@ -82,22 +90,35 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
                         c: SIMD3(0.75, 0.85, 0.55), d: SIMD3(0.72, 0.90, 0.20)),
             ]
 
-        // Electric and synthetic. Moire is an interference effect, and it wants
-        // contrast to read at all — this is the one form that earns hard colour.
-        case .lattice:
+        // The one form that earns a full spectrum. Every other form here is
+        // busy — a wide sweep on top of busy structure reads as noise, which is
+        // why the kaleidoscope's palettes are so restrained. The tunnel is the
+        // opposite: large, smooth, well-separated tiles, and it can carry a
+        // rainbow across them without any of it turning to mud.
+        //
+        // Built like the mycelial set so `t = 0` is exactly black (a == b,
+        // d = 0.5). Here that isn't for empty space, it's for the mortar
+        // between tiles — the corridor only reads as depth if the gaps are
+        // genuinely dark.
+        //
+        // The three channels are given slightly different frequencies rather
+        // than a shared one plus phase offsets. That's what makes the hue keep
+        // travelling as `t` rises instead of settling into two alternating
+        // colours.
+        case .tunnel:
             return [
+                Palette(name: "Prism",
+                        a: SIMD3(0.50, 0.50, 0.50), b: SIMD3(0.50, 0.50, 0.50),
+                        c: SIMD3(0.80, 1.00, 1.25), d: SIMD3(0.50, 0.50, 0.50)),
                 Palette(name: "Neon",
-                        a: SIMD3(0.40, 0.20, 0.45), b: SIMD3(0.45, 0.35, 0.45),
-                        c: SIMD3(1.00, 1.00, 1.00), d: SIMD3(0.00, 0.45, 0.75)),
-                Palette(name: "Chrome",
-                        a: SIMD3(0.42, 0.46, 0.52), b: SIMD3(0.32, 0.32, 0.34),
-                        c: SIMD3(0.60, 0.60, 0.60), d: SIMD3(0.30, 0.35, 0.42)),
-                Palette(name: "Ultraviolet",
-                        a: SIMD3(0.22, 0.14, 0.42), b: SIMD3(0.30, 0.22, 0.42),
-                        c: SIMD3(0.90, 1.10, 0.80), d: SIMD3(0.60, 0.70, 0.90)),
-                Palette(name: "Signal",
-                        a: SIMD3(0.26, 0.40, 0.22), b: SIMD3(0.30, 0.42, 0.20),
-                        c: SIMD3(0.70, 0.90, 0.50), d: SIMD3(0.25, 0.20, 0.10)),
+                        a: SIMD3(0.50, 0.30, 0.55), b: SIMD3(0.50, 0.30, 0.55),
+                        c: SIMD3(1.10, 0.85, 1.30), d: SIMD3(0.50, 0.50, 0.50)),
+                Palette(name: "Oilslick",
+                        a: SIMD3(0.38, 0.44, 0.52), b: SIMD3(0.38, 0.44, 0.52),
+                        c: SIMD3(1.45, 1.15, 0.90), d: SIMD3(0.50, 0.50, 0.50)),
+                Palette(name: "Vapor",
+                        a: SIMD3(0.52, 0.40, 0.48), b: SIMD3(0.52, 0.40, 0.48),
+                        c: SIMD3(0.65, 0.90, 1.05), d: SIMD3(0.50, 0.50, 0.50)),
             ]
 
         // Materials, not light. The weave reads as a made thing, so its

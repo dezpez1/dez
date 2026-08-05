@@ -27,7 +27,7 @@ constant float TAU = 6.28318530718;
 
 constant int FORM_MYCELIAL = 0;
 constant int FORM_KALEIDOSCOPE = 1;
-constant int FORM_LATTICE = 2;
+constant int FORM_TUNNEL = 2;
 constant int FORM_WEAVE = 3;
 
 // How much of a tap each form takes. Mycelial is loose and can absorb a lot;
@@ -77,6 +77,33 @@ constant float MYCELIAL_GROW_RATE = 0.045;
 constant float COLONY_START = 0.34;
 constant float COLONY_SETTLE = 0.78;
 constant float COLONY_SPREAD_SECONDS = 45.0;
+
+/// Tunnel geometry. COLUMNS is how many tiles go around the corridor and
+/// **must stay a whole number** — theta wraps at the negative x-axis and the
+/// column coordinate jumps by exactly this there, so an integer lands back on
+/// the tiling and anything else leaves a seam down that line.
+///
+/// ROW is the height of one tile row in log-radius, which is what sets how
+/// fast tiles grow as they come toward you.
+constant float TUNNEL_COLUMNS = 26.0;
+constant float TUNNEL_ROW = 0.30;
+
+/// Rows per second of travel. **This is a safety constant, not a taste one.**
+/// Bright tiles sweeping outward past dark gaps is periodic whole-field
+/// luminance modulation at exactly one cycle per row — so this number, in rows
+/// per second, is a flicker frequency in Hz. The photosensitive band starts
+/// around 3Hz. 0.30 keeps it an order of magnitude clear of it and reads as a
+/// drift rather than a ride. Do not raise it into single digits.
+constant float TUNNEL_SPEED = 0.30;
+
+/// How far the rings wind into spiral arms. Swept through zero by a slow sine,
+/// so the form passes through concentric rings and out the other side into
+/// spirals leaning the opposite way.
+constant float TUNNEL_TWIST = 1.3;
+
+constant float TUNNEL_GAP = 0.07;    // mortar between tiles
+constant float TUNNEL_ROUND = 0.16;  // corner radius
+constant float TUNNEL_BEVEL = 0.30;  // how domed each tile is
 
 // Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
 struct Uniforms {
@@ -231,47 +258,102 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
     return trapRadial * 1.45 + trapAxis * 0.85 + breathWave * 0.04;
 }
 
-/// Lattice — two hexagonal grids laid over each other at a slowly changing
-/// relative angle and scale. The pattern you see isn't either grid: it's the
-/// interference between them, which is why a fraction of a degree of drift
-/// reorganises the entire screen. Pure geometry, no noise anywhere.
-static inline float latticeField(float2 p, float drift, float breathWave,
-                                 thread float &detail) {
-    // Fine enough that the grid itself reads as a grid. The first version used
-    // scale 9, which put barely one period on screen — the whole display became
-    // a single soft blob with no lattice visible anywhere.
-    float scale = 110.0 * (1.0 + breathWave * 0.02);
+/// Tunnel — a logarithmic spiral corridor, built in log-polar coordinates.
+///
+/// Take (log r, theta) instead of (x, y) and two things become true. A
+/// logarithmic spiral turns into a straight line, so a plain square grid in
+/// that space comes back as this spiral when you map it to the screen. And
+/// zooming turns into *translation*, which is the whole reason this form is
+/// cheap: the kaleidoscope and mycelial both pay double to cross-fade two
+/// octaves so their zoom can be endless, and this one needs none of it. Tiles
+/// simply scroll, forever, out of an infinite integer grid.
+///
+/// Two constraints are structural rather than aesthetic:
+///
+/// TUNNEL_COLUMNS must stay a whole number. Theta wraps at the negative x-axis
+/// and the column coordinate jumps by exactly that value there; an integer
+/// jump lands on the same point in the tiling and nothing shows, while any
+/// other value leaves a hard seam down that line. The shear is free to be
+/// fractional — it multiplies the row coordinate, which doesn't jump.
+///
+/// TUNNEL_SPEED is a safety constant. High-contrast tiles sweeping outward is
+/// periodic whole-field luminance modulation at one cycle per row, so the rate
+/// in rows per second IS a flicker frequency in Hz. See the note in the README;
+/// this form is the one place in the app where going faster is not a taste
+/// question.
+static inline float tunnelField(float2 p, float drift, float breathWave,
+                                thread float &detail) {
+    float r = length(p);
+    float a = atan2(p.y, p.x);
 
-    // Both copies turn together slowly; what matters is the small angle
-    // BETWEEN them, and that oscillates inside a narrow band rather than
-    // running free. Letting the relative angle sweep sends the moire from
-    // one screen-sized blob to invisible grain within a few seconds — the
-    // interesting range is only about a tenth of a radian wide, so the form
-    // has to live inside it deliberately.
-    float base  = drift * 0.006;
-    float split = 0.085 + 0.030 * sin(drift * 0.045);
+    float lr = log(max(r, 1e-5)) - breathWave * 0.05;
 
-    float sum = 0.0;
-    float sharp = 0.0;
+    // Minus, so tiles sweep outward past you and the corridor comes toward the
+    // viewer. Plus reverses it into a retreat, which reads as falling backwards.
+    float rows = lr / TUNNEL_ROW - drift * TUNNEL_SPEED;
+    float cols = a / TAU * TUNNEL_COLUMNS;
 
-    for (int layer = 0; layer < 2; layer++) {
-        float rot = base + (layer == 0 ? -split : split) * 0.5;
-        float cs = cos(rot), sn = sin(rot);
-        float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs) * scale;
+    // The shear is the whole look. At zero the tiling is concentric rings; wind
+    // it up and the rings tilt into spiral arms. Sweeping it slowly through
+    // both is far more interesting than either, and costs one sine.
+    cols += rows * (TUNNEL_TWIST * sin(drift * 0.035));
 
-        // Three axes at 60 degrees = a hexagonal lattice. Summed cosines
-        // rather than a distance field, so it stays smooth and can't alias.
-        for (int k = 0; k < 3; k++) {
-            float a = float(k) * (M_PI_F / 3.0);
-            float w = cos(dot(q, float2(cos(a), sin(a))));
-            sum += w;
-            sharp += w * w;
-        }
-    }
+    float2 g = float2(cols, rows);
+    float2 cell = floor(g);
+    float2 f = fract(g) - 0.5;
 
-    // Crests where the two lattices agree — the bright nodes of the moire.
-    detail = clamp(pow(max(sharp / 6.0, 0.0), 3.0) * 1.6, 0.0, 1.0);
-    return sum * 0.18 + 0.5 + breathWave * 0.04;
+    // Rounded-rectangle distance field, negative inside the tile.
+    float2 d = abs(f) - (0.5 - TUNNEL_GAP) + TUNNEL_ROUND;
+    float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - TUNNEL_ROUND;
+
+    float face = smoothstep(0.02, -0.02, sdf);
+
+    // Square root rather than the raw bevel: it domes the tile instead of
+    // coning it, and a dome is what makes these read as glass rather than as
+    // cut paper.
+    float dome = sqrt(clamp(-sdf / TUNNEL_BEVEL, 0.0, 1.0));
+
+    // A fixed light, so every tile is lit the same way and the corridor reads
+    // as one lit space rather than as tiles that each glow on their own.
+    float2 n = f / max(length(f), 1e-4);
+    float lit = 0.55 + 0.45 * dot(n, float2(-0.42, 0.68));
+    float spec = pow(clamp(lit, 0.0, 1.0), 4.0) * (1.0 - dome) * face;
+
+    // Cells shrink without limit toward the vanishing point. Below a few pixels
+    // they alias into crawling noise, so the structure is faded out and the
+    // centre left as a glow — which is what the eye expects from a corridor
+    // going away from it anyway.
+    float core = smoothstep(0.012, 0.075, r);
+    face *= core;
+    spec *= core;
+
+    // Fading the structure out would leave a black hole at the vanishing point,
+    // which reads as a dead pixel rather than as distance. The corridor ends in
+    // light instead.
+    float glow = (1.0 - core) * 0.9;
+
+    // Per TILE, from the cell index — not from the continuous angle. Driving
+    // hue off `a` directly makes the colour sweep *through* each tile, so every
+    // tile is its own little rainbow and the tiling stops reading as tiles.
+    //
+    // The column frequency has to be a whole number of cycles per turn. cell.x
+    // jumps by exactly TUNNEL_COLUMNS across the theta wrap, so any frequency
+    // that isn't a multiple of TAU/TUNNEL_COLUMNS puts a colour seam down the
+    // negative x-axis — the same trap as the tiling itself.
+    float hue = 0.5 + 0.5 * sin(cell.x * (TAU / TUNNEL_COLUMNS)
+                                + cell.y * 0.85 + drift * 0.12);
+
+    detail = clamp(dome * face * 0.55 + spec * 1.8, 0.0, 1.0);
+
+    // Hue dominates `t`; the dome contributes only a little. That split matters
+    // more than it looks. `t` is the palette coordinate, so anything that moves
+    // it moves colour — and the first version gave the dome enough weight that
+    // shading swept the hue clean across each tile, turning every tile into its
+    // own small rainbow. Shading belongs in `detail`, which lifts brightness
+    // and only nudges hue.
+    //
+    // Gaps land at exactly t = 0, which the tunnel palettes render as black.
+    return face * (0.25 + 0.22 * dome + 1.05 * hue) + spec * 0.75 + glow;
 }
 
 /// Weave — Truchet tiling. Every cell holds two quarter-circle arcs, flipped
@@ -571,8 +653,8 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float t;
     if (form == FORM_KALEIDOSCOPE) {
         t = kaleidoscopeField(p, drift, breathWave, detail);
-    } else if (form == FORM_LATTICE) {
-        t = latticeField(p, drift, breathWave, detail);
+    } else if (form == FORM_TUNNEL) {
+        t = tunnelField(p, drift, breathWave, detail);
     } else if (form == FORM_WEAVE) {
         t = weaveField(p, drift, breathWave, detail);
     } else {
@@ -637,12 +719,16 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float fbContract = 0.998;
     if (form == FORM_KALEIDOSCOPE)   fbContract = exp2(-KALEIDO_ZOOM_RATE * dt);
     else if (form == FORM_MYCELIAL)  fbContract = exp2( MYCELIAL_GROW_RATE * dt);
+    // The tunnel moves coherently too, so it needs the same lock. Its content
+    // travels outward at TUNNEL_ROW * TUNNEL_SPEED in log-radius per second,
+    // and that's a natural log, hence exp rather than exp2.
+    else if (form == FORM_TUNNEL)    fbContract = exp(-TUNNEL_ROW * TUNNEL_SPEED * dt);
     float2 fbUV = (uv - 0.5) * fbContract + 0.5;
     float3 history = prev.sample(smp, fbUV).rgb;
-    // Lattice and weave live or die on hard edges, and heavy feedback is
+    // Tunnel and weave live or die on hard edges, and heavy feedback is
     // exactly what softens them. They keep much less history than the two
     // forms whose appeal is smear in the first place.
-    bool crisp = (form == FORM_LATTICE || form == FORM_WEAVE);
+    bool crisp = (form == FORM_TUNNEL || form == FORM_WEAVE);
     float persistBase = crisp ? 0.34 : 0.66;
     float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72);
