@@ -15,10 +15,16 @@ import Metal
 import MetalKit
 import simd
 
+/// **This struct is declared twice** — here and in `Field.metal`. There is no
+/// shared header and nothing checks that they agree, so adding a field to one
+/// side still compiles cleanly and silently reinterprets memory on the other.
+/// Every field is a `float4` for the same reason: no padding, so the two
+/// layouts can only disagree in ways that are obvious to read.
 private struct Uniforms {
     var resTime: SIMD4<Float>
     var groundCount: SIMD4<Float>
     var holdParams: SIMD4<Float>
+    var colony: SIMD4<Float>
     var palA: SIMD4<Float>
     var palB: SIMD4<Float>
     var palC: SIMD4<Float>
@@ -184,6 +190,12 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                 // dt goes to the shader so the feedback trail can be locked to
                 // the zoom rate instead of drifting at its own pace.
                 holdParams: SIMD4(state.hold, state.holdPhase, dt, 0),
+                // Mycelial only. Reach is the colony's radius on screen, push
+                // is how far taps have shoved the camera back in octaves, and
+                // the delta is this frame's share of that — the feedback trail
+                // needs it or the ghost lags behind during a pullback.
+                colony: SIMD4(state.colonyReach, state.zoomPush,
+                              state.pushDelta, 0),
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),

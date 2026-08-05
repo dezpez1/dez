@@ -70,29 +70,29 @@ constant float KALEIDO_ZOOM_RATE = 0.20;
 /// tell it moved but never see it moving.
 constant float MYCELIAL_GROW_RATE = 0.045;
 
-/// The colony's radius on screen, in field-space units where the visible area
-/// is roughly 0.46 wide and 1.0 tall — so the corners sit at ~0.55.
+/// The margin is a ridge network in log-polar coordinates, and both halves of
+/// that matter.
 ///
-/// SETTLE deliberately lands under that. An earlier 0.78 put the whole margin
-/// off-screen, and once the interesting edge is outside the frame all you can
-/// see is the middle of the mat, which is uniform — the growth becomes
-/// invisible and the form reads as texture sliding around. The colony has to
-/// stop short of filling the frame for the retreat to have anything to show.
-constant float COLONY_START = 0.30;
-constant float COLONY_SETTLE = 0.54;
-constant float COLONY_SPREAD_SECONDS = 40.0;
-
-/// The margin is a ridge network, not a wobbly circle.
+/// A ridge network because ridges branch — see `ridgedP`. Log-polar because
+/// branching has to point somewhere: `(log r, theta)` is conformal, so a
+/// feature that is long in the log-radius axis and narrow in the angular one
+/// comes back to the screen as a finger reaching outward, at every radius and
+/// without ever being drawn as a line.
 ///
-/// ANG is sampled on the unit circle, so its features are identical at every
-/// radius and come out as perfectly radial spikes — a starburst on its own.
-/// ISO is sampled on the plane and is the same at every angle. Mixing them
-/// gives spikes that vary along their length, split, and die out, which is what
-/// a branching margin is. Either alone is a pattern; the pair is a colony.
-constant float COLONY_RIDGE_ANG = 3.2;
-constant float COLONY_RIDGE_ISO = 8.5;
-constant float COLONY_BASE   = 0.50;   // reach with no ridge under it
-constant float COLONY_FINGER = 1.00;   // how far a ridge throws a finger out
+/// ANG is how many angular cells go around and **must be a whole number** —
+/// theta wraps, and `ridgedP` wraps its lattice by exactly this. RAD sets how
+/// stretched the fingers are: a feature spans `r/RAD` radially against
+/// `r*TAU/ANG` tangentially, so smaller is longer.
+///
+/// The version before this sampled one ridge field on the unit circle and one
+/// on the plane and multiplied them. Cheap, and wrong in a way that took a
+/// while to see — a field sampled on a circle is one-dimensional, and a
+/// one-dimensional ridge field has no junctions at all. It can only produce
+/// isolated spikes, which is exactly what it produced.
+constant float COLONY_BRANCH_ANG = 7.0;
+constant float COLONY_BRANCH_RAD = 0.52;
+constant float COLONY_BASE   = 0.46;   // reach with no ridge under it
+constant float COLONY_FINGER = 1.05;   // how far a ridge throws a finger out
 
 /// Ages, in octaves of camera retreat — 1 octave = 1/MYCELIAL_GROW_RATE
 /// seconds, about 22s at 0.045.
@@ -174,11 +174,43 @@ constant float TUNNEL_SPEED = 0.30;
 /// don't stay even, and past about 0.8 that reads as the packing coming apart.
 constant float TUNNEL_TWIST = 0.75;
 
-// Fully 16-byte aligned so the Swift side maps 1:1 with no padding surprises.
+/// Lobes. Without these the packing is a rigid lattice being rotated, and it
+/// reads exactly like that — marbles spinning, not a corridor flowing. Bending
+/// the log-polar coordinates *before* the packing means the whole lattice
+/// waves: rows swell and pinch, beads slide against their neighbours, and the
+/// highlights slide across them because the surface under them moved.
+///
+/// **LOBES must be a whole number**, for the same reason TUNNEL_COLUMNS is.
+/// These are driven off the raw angle, which jumps a full turn at the negative
+/// x-axis; sin(a * L) only survives that jump if L is an integer.
+/// Amplitude is capped by shape, not by taste. The warp is not conformal — its
+/// derivative with respect to the angle shears the row axis — so a bead that is
+/// a circle in the warped coordinates comes back to the screen as an ellipse,
+/// and the stretch scales with LOBE_R * LOBES. At 0.085 with three lobes every
+/// bead was an egg and the packed-marble read was gone. Half that keeps the
+/// wave and leaves them round enough to stay marbles.
+constant float TUNNEL_LOBES  = 3.0;
+constant float TUNNEL_LOBE_R = 0.048;  // how much the rings swell and pinch
+constant float TUNNEL_LOBE_A = 0.034;  // and how much they lean side to side
+
+/// How fast a bead's own colour travels, in radians per second. Each one gets
+/// its own rate inside this range, so the packing shimmers continuously without
+/// ever pulsing together — a shared rate is a whole-field rhythm, which is the
+/// thing this shader is not allowed to have. The slowest bead takes two
+/// minutes to come round, the fastest half of one.
+constant float TUNNEL_HUE_SLOW = 0.05;
+constant float TUNNEL_HUE_SPAN = 0.22;
+
+// **This struct is declared twice** — here and in FieldRenderer.swift. There is
+// no shared header and nothing checks that they agree, so adding a field to one
+// side still compiles cleanly and silently reinterprets memory on the other.
+// Every field is a float4 for the same reason: no padding, so the two layouts
+// can only disagree in ways that are obvious to read.
 struct Uniforms {
     float4 resTime;     // xy = resolution px, z = time s, w = breath phase 0..1
     float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = form
     float4 holdParams;  // x = hold amount 0..1, y = hold phase 0..1, z = frame dt s, w spare
+    float4 colony;      // x = colony reach, y = zoom push octaves, z = push delta this frame, w spare
     float4 palA;        // IQ cosine palette: bias
     float4 palB;        //                    amplitude
     float4 palC;        //                    frequency
@@ -371,6 +403,19 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
 
     float lr = log(r) - breathWave * 0.05;
 
+    // ── Lobes ──────────────────────────────────────────────────────────────
+    // Applied to the coordinates, before anything is tiled. That's the whole
+    // trick: distort the space and the packing distorts with it, so beads slide
+    // against their neighbours and their highlights travel across them, rather
+    // than a rigid lattice being spun on the spot.
+    //
+    // Two waves crossing at different rates, one of which also depends on the
+    // radius, so the swell travels down the corridor instead of standing still.
+    lr += TUNNEL_LOBE_R * (sin(a * TUNNEL_LOBES + drift * 0.09)
+                           + 0.62 * sin(a * (TUNNEL_LOBES * 2.0)
+                                        - drift * 0.061 + lr * 1.5));
+    a  += TUNNEL_LOBE_A * sin(lr * 2.3 - drift * 0.074);
+
     // Minus, so beads sweep outward past you and the corridor comes toward the
     // viewer. Plus reverses it into a retreat, which reads as falling backwards.
     float rows = lr / TUNNEL_ROW - drift * TUNNEL_SPEED;
@@ -461,14 +506,24 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // that's tight across and long down — a vertical streak; squashing it in x
     // gives the horizontal one. They cross on each bead, and because they add
     // different amounts to `t` they land as two different colours.
-    float2 d1 = (sn - float2(-0.40,  0.46)) * float2(5.6, 1.7);
-    float2 d2 = (sn - float2( 0.44, -0.30)) * float2(1.5, 5.2);
+    float2 d1 = (sn - float2(-0.40,  0.46)) * float2(6.4, 1.9);
+    float2 d2 = (sn - float2( 0.44, -0.30)) * float2(1.7, 6.0);
     float s1 = exp(-dot(d1, d1) * 3.0) * bead;
     float s2 = exp(-dot(d2, d2) * 3.4) * bead;
 
+    // ── Reflection ─────────────────────────────────────────────────────────
+    // A banded environment, looked up by the surface NORMAL rather than by
+    // position. That's the part that reads as reflective: the bands are fixed
+    // in the world, so they slide across a bead whenever the surface under them
+    // turns, and two neighbouring beads show different parts of the same room.
+    // A pattern painted in bead-local coordinates instead looks like decoration
+    // on the ball, however shiny it is.
+    float env = 0.5 + 0.5 * sin(sn.x * 7.5 - sn.y * 5.3 + h * 4.4 + drift * 0.30);
+    env = env * env * env * bead;
+
     // Bright edge where the sphere turns away — the giveaway of a transparent
     // ball, which gathers light around its silhouette instead of going dark.
-    float rim = smoothstep(0.70, 0.99, u) * bead;
+    float rim = smoothstep(0.66, 0.99, u) * bead;
 
     // Body shading. Brightness only, deliberately: see the note on `t` below.
     float lit = 0.42 + 0.58 * clamp(dot(normalize(float3(-0.32, 0.42, 0.85)),
@@ -479,7 +534,7 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // bead is already averaging out and a stray glint would be the only thing
     // left flickering.
     float sharp = smoothstep(0.34, 0.10, aa);
-    s1 *= sharp; s2 *= sharp; rim *= sharp;
+    s1 *= sharp; s2 *= sharp; rim *= sharp; env *= sharp;
 
     // Per BEAD, from the cell index — not from the continuous angle. Driving
     // hue off `a` directly makes the colour sweep *through* each bead, so every
@@ -496,8 +551,18 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // jumps is a different colour on the two sides of a line the geometry
     // crosses seamlessly. Folding it back into 0..COLUMNS-1 first is what makes
     // a per-bead random colour legal here at all.
+    //
+    // Two hashes, not one, and the second is the reason the packing looks alive
+    // rather than fixed. It gives each bead its OWN rate to travel its colour
+    // at, so they never come round together — a shared rate is a whole-field
+    // rhythm, and the thing that made the previous version read as painted was
+    // that every bead sat on its colour and stayed there.
     float cx = cell.x - floor(cell.x / TUNNEL_COLUMNS) * TUNNEL_COLUMNS;
-    float hue = 0.5 + 0.5 * sin(TAU * hash21(float2(cx, cell.y)) + drift * 0.10);
+    float hPhase = hash21(float2(cx, cell.y));
+    float hRate  = hash21(float2(cx + 7.0, cell.y - 3.0));
+    float hue = 0.5 + 0.5 * sin(TAU * hPhase
+                                + drift * (TUNNEL_HUE_SLOW
+                                           + TUNNEL_HUE_SPAN * hRate));
 
     // ── The mortar ─────────────────────────────────────────────────────────
     // Beads overlap, so what's left is small curved triangles rather than a
@@ -520,8 +585,13 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // one frame comes back as a pale fog over everything a few seconds later.
     float depth = 1.0 / (1.0 + r * 11.0);
 
-    detail = clamp(s1 * 1.5 + s2 * 1.1 + rim * 0.45 + bead * lit * 0.18
-                   + depth * 0.42 + mortar * 0.22, 0.0, 1.0);
+    // `env` and `depth` are both kept lean, and for the same reason: this
+    // form's history is sampled slightly inward every frame, so any broad
+    // brightness gets dragged outward across the whole screen and re-added as
+    // fog. Tight highlights survive that; washes compound.
+    detail = clamp(s1 * 1.5 + s2 * 1.1 + rim * 0.55 + env * 0.60
+                   + bead * lit * 0.18
+                   + depth * 0.30 + mortar * 0.22, 0.0, 1.0);
 
     // Hue dominates `t` and the body shading stays out of it. That split
     // matters more than it looks: `t` is the palette coordinate, so anything
@@ -535,7 +605,7 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // move `t` by different amounts is exactly what makes them different
     // colours — which is the one thing that says glass.
     return bead * (0.18 + 0.95 * hue)
-         + s1 * 0.24 + s2 * 0.15 + rim * 0.10
+         + s1 * 0.24 + s2 * 0.15 + rim * 0.10 + env * 0.13
          + mortar * 0.30
          + depth * 0.11;
 }
@@ -582,21 +652,46 @@ static inline float fbm3(float2 p) {
     return v;
 }
 
-/// Three-octave ridged noise, normalised to roughly 0..1.
+/// Value noise that is *exactly* periodic in y with the given period, which
+/// must be a whole number. Wrapping the lattice index rather than the
+/// coordinate is what makes it exact — the two cells either side of the seam
+/// really are the same cells, so there is nothing to blend and nothing to show.
+static inline float valueNoiseP(float2 p, float per) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float y0 = i.y - floor(i.y / per) * per;
+    float y1 = i.y + 1.0;
+    y1 = y1 - floor(y1 / per) * per;
+    float a = hash21(float2(i.x,       y0));
+    float b = hash21(float2(i.x + 1.0, y0));
+    float c = hash21(float2(i.x,       y1));
+    float d = hash21(float2(i.x + 1.0, y1));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+/// Three-octave ridged noise, periodic in y, normalised to roughly 0..1.
 ///
-/// Plain fbm gives rounded blobs, so its level sets are closed loops — an
-/// expanding boundary driven by one is always some kind of amoeba. Folding
-/// each octave about its midpoint replaces the peaks with creases, and creases
-/// meet: a ridged field has a connected network of high ground with genuine
-/// junctions in it, so a boundary riding on top of it throws fingers that
-/// split. That's the difference between a lumpy circle and something branching.
-static inline float ridged3(float2 p) {
+/// Ridged rather than plain fbm because of what the level sets do. Plain fbm is
+/// rounded blobs and its level sets are closed loops, so an expanding boundary
+/// driven by one is always some kind of amoeba. Folding each octave about its
+/// midpoint replaces the peaks with creases, and creases *meet*: a ridged field
+/// has a connected network of high ground with genuine junctions in it, so a
+/// boundary riding on top of it throws fingers that split rather than fingers
+/// that just get longer.
+///
+/// Periodic because the margin is sampled in log-polar coordinates and one of
+/// those axes is an angle. The frequency steps by exactly 2 and the period
+/// doubles with it, so every octave stays whole-numbered and the whole stack
+/// wraps.
+static inline float ridgedP(float2 p, float per) {
     float v = 0.0, a = 0.55;
     for (int i = 0; i < 3; i++) {
-        float n = 1.0 - abs(valueNoise(p) * 2.0 - 1.0);
+        float n = 1.0 - abs(valueNoiseP(p, per) * 2.0 - 1.0);
         v += a * n * n * n;   // cubed, not squared: value noise clusters around
-        p *= 2.07;            // its midpoint, so the gentler fold leaves broad
-        a *= 0.5;             // plateaus where this wants narrow ridges
+        p *= 2.0;             // its midpoint, so the gentler fold leaves broad
+        per *= 2.0;           // plateaus where this wants narrow ridges
+        a *= 0.5;
     }
     return v * (1.0 / 0.9625);
 }
@@ -784,8 +879,15 @@ static inline float mycelialLayer(float2 p, float drift, float churn,
 ///
 /// The margin still has to be in SCREEN space. One pinned in world space gets
 /// dragged inward by the retreat and shrinks to a dot however fast it grows.
+///
+/// `reach` and `push` come from Swift, because a tap changes them and a tap is
+/// an event this function has nowhere to remember. See `Colony` in
+/// FieldState.swift: at rest the mat owns the whole frame, and tapping shoves
+/// the camera back so the margin — the only part of it actually doing anything
+/// — is inside the screen again and has room to grow into.
 static inline float mycelialField(float2 p, float drift, float time,
                                   float breathWave, float tap,
+                                  float reach, float push,
                                   thread float &detail) {
     p *= 1.0 + breathWave * 0.03;
 
@@ -793,36 +895,29 @@ static inline float mycelialField(float2 p, float drift, float time,
     // Deliberately ahead of the field itself. Everything below costs two full
     // evaluations of the mat, and outside the colony all of it would be
     // multiplied by zero — so the reach is worked out first and the whole thing
-    // skipped where it can't show. During the blob phase that is most of the
+    // skipped where it can't show. Right after a tap that is most of the
     // screen, which is exactly when the two-layer cost would otherwise be
     // hardest to afford.
-    float front = mix(COLONY_START, COLONY_SETTLE,
-                      smoothstep(0.0, COLONY_SPREAD_SECONDS, time));
-
     float r = max(length(p), 1e-5);
-    float2 ring = p / r;
+    float ang = atan2(p.y, p.x) + drift * 0.004;   // the whole margin turns
 
-    // Two ridge fields, and neither works alone.
-    //
-    // The ring one is sampled on the unit circle, so it is the same at every
-    // radius: its creases run straight out from the middle and it gives clean
-    // radial spikes — but identical ones all the way along, which is a
-    // starburst, not a colony. The plane one is the same at every angle and on
-    // its own is isotropic lichen. Multiplied together the spikes get eaten
-    // into along their length, break, and pick up side branches, and that is
-    // the branching margin.
-    //
-    // Sampling the first on the circle rather than off atan2 is not a style
-    // choice: an angle out of atan2 jumps a full turn across the negative
-    // x-axis, and any noise driven by it leaves a hard seam down that line.
-    // That exact bug shipped once already in an earlier version of this form.
-    float ridgeA = ridged3(ring * COLONY_RIDGE_ANG
-                           + float2(drift * 0.011, drift * 0.008));
-    float ridgeB = ridged3(p * COLONY_RIDGE_ISO
-                           + float2(-drift * 0.009, drift * 0.013));
-    float ridge = ridgeA * (0.35 + 0.85 * ridgeB);
+    // Log-polar. The radius axis is `log r`, so a feature keeps its shape at
+    // every scale and the fingers are as detailed near the middle as at the
+    // rim; the angular axis is wrapped by `ridgedP` at COLONY_BRANCH_ANG, which
+    // is why that constant has to be a whole number. The slow sine on the
+    // radial axis is the fingers breathing in and out — without it the margin's
+    // silhouette is almost static once the colony has settled, and the mat just
+    // flows through a fixed outline.
+    float2 lp = float2(log(r) * COLONY_BRANCH_RAD + 0.22 * sin(drift * 0.023),
+                       ang / TAU * COLONY_BRANCH_ANG);
+    float ridge = ridgedP(lp, COLONY_BRANCH_ANG);
 
-    float frontEff = front * (COLONY_BASE + COLONY_FINGER * ridge);
+    // A little isotropic noise on top, so the fingers aren't all the same
+    // length and the ones that fall short leave bays behind them.
+    float lump = fbm3(p * 5.0 + float2(-drift * 0.008, drift * 0.011));
+
+    float frontEff = reach * (COLONY_BASE
+                              + COLONY_FINGER * ridge * (0.55 + 0.80 * lump));
 
     // Age in octaves of retreat. Negative means the margin hasn't been here
     // yet, and that is the only place this returns nothing — the softness at
@@ -855,7 +950,12 @@ static inline float mycelialField(float2 p, float drift, float time,
     // Driven by raw elapsed time rather than `drift`, which carries the session
     // seed and is slowed by grounding. Growth wants to be the one thing in the
     // field that is the same every session and never stops.
-    float k = fract(time * MYCELIAL_GROW_RATE);
+    //
+    // A tap adds to this phase, which is the whole reason the pullback works at
+    // all: the cross-fade is seamless at every value of k, so the camera can be
+    // shoved anywhere along the zoom at any moment and there is nothing to
+    // stitch. The mat simply rushes inward for a second and settles.
+    float k = fract(time * MYCELIAL_GROW_RATE + push);
 
     float dNear = 0.0, dFar = 0.0;
     float webNear = mycelialLayer(p * exp2(k),       drift, churn,
@@ -959,7 +1059,8 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     } else if (form == FORM_WEAVE) {
         t = weaveField(p, drift, breathWave, detail);
     } else {
-        t = mycelialField(p, drift, time, breathWave, tap, detail);
+        t = mycelialField(p, drift, time, breathWave, tap,
+                          u.colony.x, u.colony.y, detail);
     }
 
     // Both gestures shift hue as well as brightness, so a touch reads as a
@@ -1019,7 +1120,12 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float dt = max(u.holdParams.z, 1.0 / 240.0);
     float fbContract = 0.998;
     if (form == FORM_KALEIDOSCOPE)   fbContract = exp2(-KALEIDO_ZOOM_RATE * dt);
-    else if (form == FORM_MYCELIAL)  fbContract = exp2( MYCELIAL_GROW_RATE * dt);
+    // Mycelial adds this frame's share of the tap pullback. Without it the
+    // trail stays locked to the idle retreat while the camera is doing
+    // something four times faster, and the pullback — the one moment on this
+    // form where the view really moves — is the one moment the ghost lags.
+    else if (form == FORM_MYCELIAL)  fbContract = exp2( MYCELIAL_GROW_RATE * dt
+                                                        + u.colony.z);
     // The tunnel moves coherently too, so it needs the same lock. Its content
     // travels outward at TUNNEL_ROW * TUNNEL_SPEED in log-radius per second,
     // and that's a natural log, hence exp rather than exp2.
@@ -1050,6 +1156,11 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float persistBase = 0.34;
     if (form == FORM_MYCELIAL)          persistBase = 0.66;
     else if (form == FORM_KALEIDOSCOPE) persistBase = 0.50;
+    // The tunnel is the least of all of them. Glass is a hard-edged material
+    // and every frame of history is one more frame of soft focus over it — and
+    // this form is the one whose history is dragged outward from a bright
+    // centre, so its trail also fogs the mortar it's supposed to leave dark.
+    else if (form == FORM_TUNNEL)       persistBase = 0.26;
     float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72 * inFrame);
 

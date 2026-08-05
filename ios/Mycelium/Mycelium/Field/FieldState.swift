@@ -36,6 +36,36 @@ enum Breath {
     static let holdPulseSeconds: Float = 2.2
 }
 
+/// The mycelial colony's own dynamics. Lives here rather than in the shader
+/// because a tap changes it, and a tap is an event — the shader is a pure
+/// function of what it's handed and has nowhere to keep the consequence.
+///
+/// The mechanic: the mat grows until it fills the frame and then sits there.
+/// Tapping shoves the camera back, which shrinks everything on screen and puts
+/// the margin back inside the frame, and the colony has to grow into the space
+/// again. So the form is a settled mat you can always give something to do.
+enum Colony {
+    /// Screen radius in field units, where the visible area is ~0.46 wide and
+    /// 1.0 tall — the corners sit at ~0.55.
+    static let start: Float = 0.30
+    /// Past the corners on purpose: at rest the mat owns the whole frame.
+    static let full: Float = 0.86
+    /// However many times it gets tapped, the colony never shrinks to nothing.
+    static let floorReach: Float = 0.17
+
+    /// Exponential approach, so growth always eases into place instead of
+    /// arriving on an edge. Roughly 95% of the way back in 3x this.
+    static let regrowTau: Float = 13.0
+
+    /// How far back one tap shoves the camera, in octaves. 0.62 is a shrink to
+    /// 65% — big enough that the margin is unmistakably back in frame, small
+    /// enough that the mat doesn't vanish to a speck.
+    static let tapPullback: Float = 0.62
+    /// And how fast that shove eases in. Fast enough to read as caused by the
+    /// finger, slow enough that it's a lurch backwards rather than a cut.
+    static let pushRate: Float = 1.8
+}
+
 @MainActor
 @Observable
 final class FieldState {
@@ -71,11 +101,40 @@ final class FieldState {
     private(set) var holdTarget: Float = 0
     private(set) var holdPhase: Float = 0
 
+    /// The mycelial colony. `reach` is its radius on screen; `zoomPush` is how
+    /// far the camera has been shoved back, in octaves, and only ever grows.
+    /// `pushDelta` is what it moved this frame — the shader needs it to keep
+    /// the feedback trail locked to the camera during a pullback.
+    private(set) var colonyReach: Float = Colony.start
+    private(set) var zoomPush: Float = 0
+    private(set) var pushDelta: Float = 0
+    private var zoomPushTarget: Float = 0
+
     /// Stable per-session seed so the same session looks like itself.
     let seed: Float = Float.random(in: 0..<100)
 
     func advance(deltaTime: Float) {
         elapsed += deltaTime
+
+        // ── The colony ─────────────────────────────────────────────────────
+        let prevPush = zoomPush
+        if abs(zoomPushTarget - zoomPush) > 0.0005 {
+            zoomPush += (zoomPushTarget - zoomPush) * min(deltaTime * Colony.pushRate, 1)
+        } else {
+            zoomPush = zoomPushTarget
+        }
+        pushDelta = zoomPush - prevPush
+
+        // Whatever the camera just did to the frame, the colony's footprint on
+        // it did too. Driving both off the same eased delta rather than
+        // setting the reach outright at the moment of the tap is what keeps
+        // them from drifting apart: the mat shrinks at exactly the rate the
+        // view pulls back, so the margin never slides against the texture.
+        colonyReach = max(colonyReach * exp2(-pushDelta), Colony.floorReach)
+
+        // Then it grows back into the room it was just given.
+        colonyReach += (Colony.full - colonyReach)
+                     * (1 - exp(-deltaTime / Colony.regrowTau))
 
         // Ease grounding toward its target over roughly a second.
         let easeRate: Float = 1.6
@@ -109,6 +168,18 @@ final class FieldState {
     func addBloom(x: Float, y: Float, strength: Float = 1.0) {
         let bloom = Bloom(x: x, y: y, birth: elapsed, strength: strength)
         blooms.append(bloom)
+
+        // A tap shoves the camera back. Only mycelial reads this, and only
+        // mycelial wants it: on that form the mat settles into owning the whole
+        // frame, and pulling back is what puts the growing margin — the only
+        // part of it that's actually doing anything — back inside the screen.
+        //
+        // Accumulated rather than assigned, so leaning on the screen keeps
+        // opening space rather than one tap winning and the rest doing nothing.
+        //
+        // Gated on the form, or tapping the kaleidoscope would quietly shrink a
+        // colony you aren't looking at and you'd come back to a speck.
+        if form == .mycelial { zoomPushTarget += Colony.tapPullback }
         // Oldest-out. Bounded so the uniform buffer never overflows.
         if blooms.count > Self.maxBlooms {
             blooms.removeFirst(blooms.count - Self.maxBlooms)

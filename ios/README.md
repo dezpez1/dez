@@ -229,13 +229,15 @@ Most of the feel lives in a handful of constants:
 | kaleidoscope zoom speed | `KALEIDO_ZOOM_RATE` — octaves per second, currently 0.20 (a doubling every 5s). Past ~0.25 it stops being hypnotic and starts feeling like falling. **Changing this alone is enough; the feedback trail follows it automatically** |
 | how much of the kaleidoscope is flat wash | `trapSum` in `kaliLayer` and its two weights. The min-traps go quiet where the orbit settles early; this one keeps accumulating and is what puts structure in those regions. **Weight it into `detail`, not `t`** — see below |
 | mycelial retreat speed | `MYCELIAL_GROW_RATE` — the same mechanism run backwards, currently 0.045. **This is not the perceived rate**, see below. It is also the clock every `AGE_*` constant is measured against |
-| how big the colony starts | `COLONY_START` — screen radius in field units, where the visible area is ~0.46 wide and 1.0 tall |
-| how far it spreads, and how long it takes | `COLONY_SETTLE` and `COLONY_SPREAD_SECONDS`. Settle sits under the screen corners (~0.55) on purpose — put the margin off-screen and the growth becomes invisible |
-| how ragged the growing margin is | `COLONY_RIDGE_ANG` / `COLONY_RIDGE_ISO` (the two ridge fields) and `COLONY_BASE` / `COLONY_FINGER` (how far a ridge throws a finger). **Both fields are needed**, see below |
+| the colony's size, growth and tap response | `Colony` in **`FieldState.swift`**, not the shader — `start`, `full`, `regrowTau`, `tapPullback`, `pushRate`, `floorReach`. A tap changes these and a tap is an event; the shader has nowhere to keep one |
+| how ragged the growing margin is | `COLONY_BRANCH_ANG` (**must be a whole number**) and `COLONY_BRANCH_RAD` shape the fingers; `COLONY_BASE` / `COLONY_FINGER` set how far a ridge throws one. See below for why it's log-polar |
 | how growth stages behind the margin | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE` — in octaves of retreat, so ~22s each at the current rate. This staging is the whole growth model, see below |
 | tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
 | tunnel bead count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW`, which is *derived*: `(TAU / COLUMNS) * 0.866` for a staggered circle packing. Move one and the other has to follow |
 | tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways. Capped by the packing, see below |
+| tunnel flow | `TUNNEL_LOBES` (**must be a whole number**), `TUNNEL_LOBE_R`, `TUNNEL_LOBE_A`. Amplitude is capped by shape, not taste — see below |
+| how fast the beads change colour | `TUNNEL_HUE_SLOW` and `TUNNEL_HUE_SPAN`, in rad/sec. Each bead draws its own rate from that range; **never give them a shared one** |
+| how reflective the beads look | `env` — a banded environment looked up by the surface normal. Weight it into `detail`; it's a broad term and broad terms fog through the feedback |
 | tunnel bead size | `TUNNEL_BEAD`, in column widths. **0.433 is a hard ceiling** and the twist is what sets it, see below |
 | tunnel mortar glow | `TUNNEL_GAP_WAVE` / `TUNNEL_GAP_DRIFT` (the travelling pulse) and `TUNNEL_GAP_FLOOR` / `TUNNEL_GAP_SWING` (how dark it gets and how far it swings) |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
@@ -471,31 +473,65 @@ simply materialises at full complexity wherever the margin happens to be — whi
 is the "already there, just uncovered" read, arrived at from a different
 direction.
 
-Three things about the margin itself:
+#### The margin, and why fingers need two dimensions
 
-**It has to be measured in screen space, not world space.** The camera is
-retreating at the same time, so a margin pinned in world space gets dragged
+**Ridged noise, not fbm.** A ridged field's high ground is a *connected network
+with junctions*, so a boundary riding on it throws fingers that split. Plain fbm
+has closed level sets and can only ever give you an amoeba.
+
+**In log-polar, not on a circle.** The version before this sampled one ridge
+field on the unit circle (identical at every radius, so radial) and one on the
+plane, and multiplied them. Cheap, and wrong in a way that took a while to see —
+*a field sampled on a circle is one-dimensional, and a one-dimensional ridge
+field has no junctions at all.* It can only produce isolated spikes, which is
+exactly what it produced: fingers that were individual thin lines rather than
+anything branching.
+
+The fix is a genuinely 2-D ridge field in `(log r, theta)`. That space is
+conformal to the screen, so a feature that's long in the log-radius axis and
+narrow in the angular one comes back as a finger reaching outward — at every
+radius, with a real ridge network's junctions in it, and without any of it being
+drawn as a line. `COLONY_BRANCH_RAD` sets how stretched: a feature spans
+`r/RAD` radially against `r*TAU/ANG` tangentially, so smaller is longer.
+
+`COLONY_BRANCH_ANG` **must be a whole number**, because one of those axes is an
+angle. `ridgedP` wraps its lattice *index* by exactly that value rather than
+wrapping the coordinate — the cells either side of the seam really are the same
+cells, so there's nothing to blend and nothing to show. The octave step is
+exactly 2.0 and the period doubles with it, so every octave stays whole.
+
+(The old form of this bug is worth remembering too: an angle taken straight out
+of `atan2` jumps a full turn across the negative x-axis, and any noise driven by
+it leaves a hard seam down that line. That shipped once.)
+
+**The margin has to be measured in screen space, not world space.** The camera
+is retreating at the same time, so a margin pinned in world space gets dragged
 inward and shrinks to a dot however fast you grow it.
 
-**It needs two ridge fields, and neither works alone.** `ridged3` rather than
-`fbm3` because a ridged field's high ground is a *connected network with
-junctions*, so a boundary riding on it throws fingers that split; plain fbm has
-closed level sets and can only ever give you an amoeba. `COLONY_RIDGE_ANG` is
-sampled on the unit circle, so its creases are identical at every radius and
-give clean radial spikes — a starburst on its own. `COLONY_RIDGE_ISO` is sampled
-on the plane and is the same at every angle — isotropic lichen on its own.
-Multiplied, the spikes get eaten into along their length, break, and pick up
-side branches.
+#### Tap to make room
 
-**`COLONY_SETTLE` must stay under the screen corners (~0.55).** An earlier 0.78
-put the whole margin off-screen, and once the interesting edge is outside the
-frame all you can see is the middle of the mat, which is uniform. The growth
-becomes invisible and the form goes back to reading as texture sliding around.
+At rest the mat owns the whole frame — which is what it should do, and also
+means the only part of it that's *doing* anything is off-screen. So a tap shoves
+the camera back by `Colony.tapPullback` octaves, the mat shrinks to a blob, and
+it has to grow into the frame again over the next twenty-odd seconds.
 
-The ring field is sampled on the unit circle rather than from `atan2`. An angle
-taken straight out of `atan2` jumps a full turn across the negative x-axis, and
-any noise driven by it leaves a hard seam down that line — a bug that shipped
-once already in an earlier version of this form.
+This is why `Colony` lives in `FieldState.swift` and not in the shader: a tap is
+an event, and the shader is a pure function of what it's handed with nowhere to
+keep a consequence. Three things make it work:
+
+- **The pullback is added to the zoom phase**, `fract(time * RATE + push)`. The
+  octave cross-fade is seamless at *every* value of k, so the camera can be
+  shoved anywhere along the zoom at any moment and there is nothing to stitch.
+- **Reach and camera are driven off the same eased delta**, rather than the
+  reach being set outright at the moment of the tap. The mat shrinks at exactly
+  the rate the view pulls back, so the margin never slides against the texture.
+- **The feedback contraction gets this frame's share of the push.** Without it
+  the trail stays locked to the idle retreat while the camera is doing something
+  four times faster, and the one moment the view really moves is the one moment
+  the ghost lags behind it.
+
+Gated on the form in `addBloom`, or tapping the kaleidoscope would quietly
+shrink a colony you aren't looking at and you'd come back to a speck.
 
 ### The tunnel, and why it's the cheap one
 
@@ -556,6 +592,39 @@ highlights are the deliberate exception — they're tight enough to read as glin
 rather than as a gradient, and the fact that they move `t` by *different* amounts
 is exactly what makes them different colours, which is the one thing that says
 glass rather than painted plastic.
+
+#### Making it flow instead of spin
+
+A rigid lattice being rotated reads exactly like a rigid lattice being rotated —
+marbles spinning, not a corridor flowing. The lobes bend the log-polar
+coordinates *before* anything is tiled, so the whole packing waves: rows swell
+and pinch, beads slide against their neighbours, and their highlights travel
+across them because the surface underneath moved.
+
+**`TUNNEL_LOBES` must be a whole number**, same rule as `TUNNEL_COLUMNS` and for
+the same reason — it's driven off the raw angle, which jumps a full turn at the
+seam, and `sin(a * L)` only survives that if `L` is an integer.
+
+**Amplitude is capped by shape, not taste.** The warp is not conformal: its
+derivative with respect to the angle shears the row axis, so a bead that is a
+circle in the warped coordinates comes back as an ellipse, and the stretch
+scales with `LOBE_R * LOBES`. At 0.085 with three lobes every bead was an egg
+and the packed-marble read was gone.
+
+Two other things sell the material, and both are about what the pattern is a
+function of:
+
+**The beads each change colour at their own rate.** Two hashes, not one — the
+second gives every bead its own speed to travel its hue at, so they never come
+round together. A shared rate is a whole-field rhythm, which is the thing this
+shader must never have, and the version before this had every bead sitting on
+its colour and staying there, which is most of what made them look painted.
+
+**The reflection is looked up by the surface normal, not by position.** That's
+the part that reads as reflective: the bands are fixed in the world, so they
+slide across a bead whenever the surface under them turns and two neighbours
+show different parts of the same room. A pattern in bead-local coordinates looks
+like decoration on the ball however shiny you make it.
 
 #### Keeping the vanishing point alive
 
