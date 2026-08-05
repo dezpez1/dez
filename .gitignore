@@ -22,3 +22,10 @@ recordings/
 # Source art for the app icon. The committed 1024 icon is the deliverable;
 # the full-res original stays local.
 *.avif
+
+# Reference photography. The mycelial form was built by looking at a licensed
+# stock photo of a real network, and that photo is somebody else's work — this
+# repo is public, so it stays local. Shaders in, references out.
+shutterstock_*.jpg
+shutterstock_*.jpeg
+shutterstock_*.png
