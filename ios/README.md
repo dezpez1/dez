@@ -240,7 +240,8 @@ Most of the feel lives in a handful of constants:
 | the wave running down the corridor | `TUNNEL_WAVE_A` / `_K` / `_RATE` / `_TILT`. A×K is how much it stretches the rows; TILT **must be a whole number**. This is the one warp free to have real amplitude — see below |
 | how much the beads spin | `TUNNEL_TWIST` and the `drift` rates on the lobes. All roughly halved once the wave was carrying the motion |
 | bead shape | `TUNNEL_SQUARE` (0 = circles, 1 = a rounded square) and `TUNNEL_CYL` (0 = sphere, 1 = a rod). CYL is what makes the highlight a line instead of a dot |
-| the colour, which belongs to the room | `TUNNEL_SPIRAL_R` / `_A` / `_RATE` and `TUNNEL_REFLECT`. **All four are capped by the same thing** — a bead that spans much of the palette is a rainbow however the colour got there. See below |
+| the light, and how fast its colour travels out | `TUNNEL_SPIRAL_R` / `_A` / `_RATE` and `TUNNEL_LIGHT`. Nothing per bead touches `t` at all — **read the note below before adding anything that does** |
+| how much of the screen the field renders at | `FieldRenderer.fieldScale`. The biggest lever on frame time in the app; see Performance |
 | tunnel bead count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW`, which is *derived*: `(TAU / COLUMNS) * 0.866` for a staggered circle packing. Move one and the other has to follow |
 | tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways. Capped by the packing, see below |
 | tunnel flow | `TUNNEL_LOBES` (**must be a whole number**), `TUNNEL_LOBE_R`, `TUNNEL_LOBE_A`. Amplitude is capped by shape, not taste — see below |
@@ -783,37 +784,57 @@ neighbours meet along longer flats. The metric has to be the same one the
 nine-way nearest-centre test uses, or the assignment and the silhouette disagree
 and beads get clipped against cells they don't belong to.
 
-#### Colour that belongs to the room, not to the bead
+#### The light changes, the beads don't
 
-The version before this hashed a hue per cell — a jar of mixed marbles, every one
-a painted object carrying its own colour around. What a reflective object
-actually does is the opposite: it has no colour, it shows you the colour of
-what's around it, and the colour therefore belongs to the *room* and stays put
-while the objects move through it.
+Two ways to make a bead look reflective: give it the **colour** of what's around
+it, or give it the **brightness** of what's around it. The colour route was tried
+twice and failed twice, and the reason is the same both times.
 
-So the palette coordinate is a logarithmic spiral, which in log-polar coordinates
-is a straight line and costs one sine, built from the log-radius from **before**
-the wave and the lobes bent it — so the colour field stays a clean spiral while
-the lattice flexes underneath it, rather than pumping along with the rows. It
-travels outward slower than the beads do, so they slide through it.
+`t` is a scalar into a cosine palette that runs about one full cycle over 0..1.
+Anything that sweeps a decent fraction of that range across a *single bead* puts
+a complete rainbow on every bead — which is exactly what the original per-bead
+hue hash was replaced to stop, arriving by a different route. It got there first
+through `TUNNEL_REFLECT` at 1.55, then through the two speculars at nearly a
+quarter of the ramp each.
 
-The reflection is then the spiral looked up through the surface **normal** rather
-than the position. That's the part that reads as reflective: the bead is showing
-a bent, compressed image of the arm behind it, so the colour travels *across* it
-as the surface turns, and the two ends of the same rod come out different
-colours. A pattern in bead-local coordinates looks like decoration on the ball
-however shiny you make it.
+So the colour is purely **emitted** now. There is a light at the vanishing point
+whose colour changes, and it travels outward:
 
-**All four of these constants are capped by the same thing, and it caught this
-form twice.** These palettes run about one full cycle over `t` in 0..1. Anything
-that sweeps most of that range across a *single bead* puts a complete rainbow on
-every bead — which is exactly what the per-bead hue hash was replaced to stop,
-arriving by a different route. It happened first through `TUNNEL_REFLECT` at
-1.55, and again through the two specular highlights, which were adding nearly a
-quarter of the ramp each and turning every glint into its own colour band. The
-rule: `SPIRAL_R`, `SPIRAL_A` and `REFLECT` together should move `t` by well under
-half a cycle across one bead, and brightness that isn't meant to change hue goes
-through `detail`, which lifts without moving along the palette.
+```metal
+float lightPhase = TAU * (lrRoom * TUNNEL_SPIRAL_R - drift * TUNNEL_SPIRAL_RATE)
+                 + a * TUNNEL_SPIRAL_A;
+float spiral    = 0.5 + 0.5 * sin(lightPhase);
+float lightLift = 1.0 + TUNNEL_LIGHT * sin(lightPhase - 1.5708);
+```
+
+A function of position and time and **nothing else** — no hash, no cell index, no
+surface normal. Every bead in a ring shares a colour and the colour marches out
+through them. `lightLift` is the same wave a quarter turn ahead, carried on
+`shade`, so the leading edge of an arm is the bright part; that is what makes it
+read as a *light* rather than as a tint. It's built from `lrRoom`, the log-radius
+from before the wave and the lobes bent it, so the arm stays clean while the
+lattice flexes underneath it rather than pumping along with the rows.
+
+Safe as whole-field modulation because it **travels**: the bright part is always
+somewhere, just not here, so total screen luminance barely moves. Same argument
+as the mortar pulse.
+
+What makes the beads look polished is then brightness sliding across their faces,
+and that has now lived in three different places:
+
+- **In `t`.** A glint that moves the palette coordinate is a different *colour*,
+  not a brighter one. Every bead came out striped.
+- **In `shade`.** Which seems obviously right — `shade` is a raw multiply applied
+  after the palette, so it can't touch hue. But stacking four highlights into it
+  pushes pixels to three times white, and nothing downstream is built for that:
+  the contrast curve, the tonemap and the saturation lift all clip per channel at
+  different points, so what came out was hard-edged rainbow *spikes*. Worse than
+  the problem it fixed.
+- **In `detail`**, which is where they are. It mixes toward `palette(t + 0.18)`
+  at a weight that is clamped to 1. It lifts, it nudges the hue slightly, and it
+  cannot blow out — and that bound is the whole reason it's the right channel.
+
+`shade` still carries the diffuse term and the travelling light, and stays near 1.
 
 #### Keeping the vanishing point alive
 
@@ -884,6 +905,45 @@ leaves hard seams down the mirror lines — a discontinuity through the center
 and straight edges radiating out. The angle gets lifted by `TAU` first for
 exactly this reason. If you touch that fold, check it full-screen: the bug is
 nearly invisible in a small preview tile.
+
+## Performance
+
+The whole app is one fullscreen fragment shader plus a feedback blend, so cost is
+almost exactly proportional to **pixels x ALU**, and there is no geometry, no
+overdraw and no draw-call count to think about. Two levers, in order of size:
+
+**Render the field below native resolution.** `FieldRenderer.fieldScale`, 0.72
+linear, so barely half the fragments. The present pass still runs at full drawable
+size and upsamples with a linear sampler. This costs almost nothing here because
+none of these forms *have* detail at pixel scale by construction: mycelial's
+sheath is a soft falloff, the tunnel anti-aliases its beads to their own average
+as they approach a pixel across, and every form is then blended with a blurred
+copy of the previous frame at 26–66%. A 3x phone renders the field at an
+effective 2.2x and the feedback smears it anyway. **If a future form has hard
+sub-pixel structure, this is the first thing to put back.**
+
+Watch the one trap: `resTime.xy` has to be the *field* size, not the drawable
+size. Getting it wrong doesn't crash — the aspect correction goes subtly off and
+the tunnel's anti-aliasing starts lying about how big a pixel is.
+
+**Then the inner loops, which are the ones that run tens of times per pixel.**
+
+- The tree's tangent rotation was `atan(2*bend)` then `sin` and `cos` of it —
+  three transcendentals, thirty times a pixel. The slope *is* the tangent of that
+  angle, so `cos = rsqrt(1 + slope^2)` gives the whole frame in one hardware op.
+- Three `hash21` per level down to two, by reusing `fract(h * 31.7)`.
+- The tunnel's nine-way nearest-centre search ran three square roots per
+  candidate — twenty-seven — to build a metric whose only job inside the loop is
+  to be compared. Squared Euclidean orders the candidates identically for the
+  round part and within a few percent for the squared part, and the real
+  superellipse distance is computed once, outside, for whichever won.
+- `mycelialLayer` ran four `fbm3` calls, which is forty-eight hashes, on most of
+  the screen. Two of them wanted noise at almost the same frequency for two
+  different jobs; they share one field now, and the thread wander tops it up with
+  a single octave instead of a whole second stack.
+
+Not measured on device — the simulator runs on the Mac's GPU and would report
+whatever it likes. These are counted reductions, not benchmarked ones.
 
 ## Not built yet
 

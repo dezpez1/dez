@@ -109,10 +109,36 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
         sampler = device.makeSamplerState(descriptor: d)
     }
 
+    /// How much of the screen's resolution the *field* pass actually renders
+    /// at. The present pass still runs at full drawable size and upsamples with
+    /// a linear sampler, so text-sharp edges would suffer — and there are none.
+    ///
+    /// This is the single biggest lever on frame time in the whole app, and it
+    /// is worth understanding why it costs so little here. Every form is a
+    /// fragment shader with no geometry, so cost is exactly proportional to
+    /// pixels: 0.72 linear is barely half the work. What it buys back is
+    /// detail, and these forms have none at pixel scale by construction —
+    /// mycelial's sheath is a soft falloff, the tunnel anti-aliases its beads
+    /// to their own average as they approach a pixel across, and every form
+    /// then gets blended with a blurred copy of the previous frame at 26–66%.
+    /// A 3x phone screen is rendering the field at an effective 2.2x and the
+    /// feedback pass is smearing it anyway.
+    ///
+    /// If a future form has hard sub-pixel structure this is the first thing to
+    /// put back.
+    private static let fieldScale: CGFloat = 0.72
+
+    /// The size the field pass actually renders at — which is what the shader
+    /// needs in `resTime.xy`, not the drawable size. Getting that wrong doesn't
+    /// crash: the aspect correction goes subtly wrong and the tunnel's
+    /// anti-aliasing starts lying about how big a pixel is.
+    private var fieldSize = CGSize(width: 1, height: 1)
+
     private func rebuildTextures(size: CGSize) {
-        let w = max(Int(size.width), 1)
-        let h = max(Int(size.height), 1)
+        let w = max(Int((size.width  * Self.fieldScale).rounded()), 1)
+        let h = max(Int((size.height * Self.fieldScale).rounded()), 1)
         guard w > 1, h > 1 else { return }
+        fieldSize = CGSize(width: w, height: h)
 
         let d = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: Self.accumFormat, width: w, height: h, mipmapped: false)
@@ -178,7 +204,8 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
         if let enc = cmd.makeRenderCommandEncoder(descriptor: fieldPass) {
             enc.setRenderPipelineState(fieldPipeline)
 
-            let size = view.drawableSize
+            // The field pass's own size, not the drawable's — see `fieldSize`.
+            let size = fieldSize
             let pal = state.palette
             var uniforms = Uniforms(
                 resTime: SIMD4(Float(size.width), Float(size.height),

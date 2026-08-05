@@ -394,20 +394,26 @@ constant float TUNNEL_SPIRAL_R    = 0.32;   // colour cycles per unit log-radius
 constant float TUNNEL_SPIRAL_A    = 1.0;    // arms
 constant float TUNNEL_SPIRAL_RATE = 0.030;  // cycles per second, outward
 
-/// And how much of that spiral a single bead's curvature sweeps up, in radians
-/// of palette phase. This is the reflection. Looking the colour up through the
-/// surface NORMAL rather than the position is what makes it read as reflective
-/// instead of painted: the bead is showing a bent image of the spiral behind
-/// it, so the colour slides across it whenever the surface turns.
+/// **Nothing per bead touches `t` at all any more, and that is the point.**
 ///
-/// **It has to stay small, and the reason is the palette.** These palettes run
-/// about one full cycle over t in 0..1, so a reflection that sweeps most of
-/// that range across a single bead puts a complete rainbow on every bead — the
-/// exact thing the per-bead hue hash was replaced to stop, arriving by a
-/// different route. At 0.55 the surface sweeps roughly a fifth of the ramp,
-/// which reads as a polished thing sliding through a coloured room rather than
-/// as a thing that is itself coloured.
-constant float TUNNEL_REFLECT = 0.34;
+/// Two ways to make a bead look reflective: give it the colour of what's around
+/// it, or give it the *brightness* of what's around it. The first was tried
+/// twice and failed twice, both times for the same reason — `t` is a scalar
+/// into a cosine palette that runs a full cycle over 0..1, so anything sweeping
+/// a decent fraction of that range across one bead is a rainbow on every bead,
+/// however principled the thing doing the sweeping was. It got there first
+/// through the reflection strength and then through the two speculars.
+///
+/// So the colour is purely emitted now. There is a light at the vanishing point
+/// whose colour changes, and it travels outward: `t` is a function of position
+/// and time and nothing else, so every bead in a ring shares a colour and the
+/// colour marches out through them. What makes them look polished is brightness
+/// sliding across their faces — `env`, `rim` and the two speculars, all of
+/// which go through `shade` and `detail`, neither of which can move the hue. A
+/// mirror in a room lit by one colour is exactly this.
+///
+/// This is the knob for how much the light reads as light rather than as tint.
+constant float TUNNEL_LIGHT = 0.42;
 
 /// How much light reaches the side of a bead facing away. Low enough that the
 /// terminator is unmistakable — a sphere is legible as a sphere because of
@@ -684,7 +690,7 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     float aspect = TUNNEL_ROW * TUNNEL_COLUMNS / TAU;   // = sqrt(3)/2 as tuned
     float rowI = floor(rows);
 
-    float dq = 1e9;
+    float dq = 1e9;   // squared, until the winner is picked
     float2 e = float2(0.0);
     for (int dj = -1; dj <= 1; dj++) {
         float cj = rowI + float(dj);
@@ -700,17 +706,23 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
             // twist. Undone, the map to the screen is conformal and a circle
             // here is a circle on screen, at any shear and any radius.
             float2 ee = float2(off.x - shear * off.y, off.y * aspect);
-            // Superellipse rather than circle — see TUNNEL_SQUARE. The metric
-            // has to be the same one the nearest-centre test uses or the
-            // assignment and the silhouette disagree and beads get clipped
-            // against cells they don't belong to.
-            float2 sq = ee * ee;
-            float d = mix(sqrt(sq.x + sq.y),
-                          sqrt(sqrt(sq.x * sq.x + sq.y * sq.y)),
-                          TUNNEL_SQUARE);
-            if (d < dq) { dq = d; e = ee; }
+            // Nearest centre by SQUARED distance. Twenty-seven square roots ran
+            // in here — three per candidate, nine candidates — to compute a
+            // metric whose only job inside the loop is to be compared. Squared
+            // Euclidean orders the candidates identically for the round part
+            // and within a few percent for the squared part, and the real
+            // metric is computed once, outside, for whichever won.
+            float d2 = dot(ee, ee);
+            if (d2 < dq) { dq = d2; e = ee; }
         }
     }
+
+    // Now the real metric, once. Superellipse rather than circle — see
+    // TUNNEL_SQUARE — which closes the packing without moving any centres.
+    float2 sq = e * e;
+    dq = mix(sqrt(sq.x + sq.y),
+             sqrt(sqrt(sq.x * sq.x + sq.y * sq.y)),
+             TUNNEL_SQUARE);
 
     // ── The vanishing point ────────────────────────────────────────────────
     // Beads shrink without limit toward the centre, and the previous version
@@ -795,28 +807,27 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     float sharp = smoothstep(0.34, 0.10, aa);
     s1 *= sharp; s2 *= sharp; rim *= sharp; env *= sharp;
 
-    // ── The colour, which belongs to the room ──────────────────────────────
-    // Nothing here is per bead, and that is the change. The previous version
-    // hashed a hue per cell — a jar of mixed marbles, every one of them a
-    // painted object carrying its own colour around with it. A reflective
-    // object has no colour; it shows you what's around it. So the palette
-    // coordinate is a spiral fixed in the corridor, and the beads pass through
-    // it and pick up whatever they're sitting on.
+    // ── The light, which is emitted at the middle and travels out ──────────
+    // A function of position and time, and of nothing else. No hash, no cell
+    // index, no surface normal — see TUNNEL_LIGHT for why anything per bead in
+    // here has twice come out as a rainbow on every bead.
     //
-    // Built from `lrRoom` — the log-radius from before the wave and the lobes
-    // bent it — so the colour field stays a clean spiral while the lattice
-    // flexes underneath it, rather than pumping along with the rows.
+    // Built from `lrRoom`, the log-radius from before the wave and the lobes
+    // bent it, so the light stays a clean arm while the lattice flexes
+    // underneath it rather than pumping along with the rows.
+    float lightPhase = TAU * (lrRoom * TUNNEL_SPIRAL_R
+                              - drift * TUNNEL_SPIRAL_RATE)
+                     + a * TUNNEL_SPIRAL_A;
+    float spiral = 0.5 + 0.5 * sin(lightPhase);
+
+    // And it reads as light rather than as tint because it carries brightness
+    // with it, a quarter turn ahead of the colour — so the leading edge of an
+    // arm is the bright part, which is what a source sweeping past looks like.
     //
-    // The `sn` term is the reflection, and it is doing the work the per-bead
-    // hash used to do badly. Looking the spiral up through the surface normal
-    // means a curved face shows a bent, compressed image of the arm behind it,
-    // and the colour therefore travels ACROSS each bead as the surface turns —
-    // which is what tells you it's polished. The two ends of the same rod come
-    // out different colours because they face different ways.
-    float spiral = 0.5 + 0.5 * sin(TAU * (lrRoom * TUNNEL_SPIRAL_R
-                                          - drift * TUNNEL_SPIRAL_RATE)
-                                   + a * TUNNEL_SPIRAL_A
-                                   + (sn.x * 1.6 - h * 0.9) * TUNNEL_REFLECT);
+    // Safe as whole-field modulation because it TRAVELS: the bright part is
+    // always somewhere, just not here, so total screen luminance barely moves.
+    // Same argument as the mortar pulse below.
+    float lightLift = 1.0 + TUNNEL_LIGHT * sin(lightPhase - 1.5708);
 
     // ── The mortar ─────────────────────────────────────────────────────────
     // Beads overlap, so what's left is small curved triangles rather than a
@@ -843,12 +854,30 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // form's history is sampled slightly inward every frame, so any broad
     // brightness gets dragged outward across the whole screen and re-added as
     // fog. Tight highlights survive that; washes compound.
+    // The highlights go here, and this is the third place they have been.
+    //
+    // Not in `t`: that is the palette coordinate, so a glint there is a
+    // different colour rather than a brighter one, and every bead came out
+    // striped. Not in `shade` either, which is where they went next — `shade`
+    // is a raw multiply and stacking four highlights into it pushed pixels to
+    // three times white. Nothing downstream is built for that: the contrast
+    // curve, the tonemap and the saturation lift all clip per channel, at
+    // different points, so what came out was hard-edged rainbow spikes.
+    //
+    // `detail` mixes toward `palette(t + 0.18)` at a bounded weight. It lifts,
+    // it nudges the hue slightly, and it cannot blow out. That bound is the
+    // whole reason it is the right channel for this.
     detail = clamp(s1 * 1.25 + s2 * 0.95 + rim * 0.60 + env * 0.60
                    + depth * 0.30 + mortar * 0.22, 0.0, 1.0);
 
     // Only the beads are shaded. The mortar is a light source, not a surface,
     // so it keeps its own brightness.
-    shade = mix(1.0, lit, bead);
+    //
+    // Both multiplied by the travelling light. `shade` is applied after the
+    // palette, so this is the one place the light can change how bright things
+    // are without dragging their colour anywhere. It stays near 1 — see the
+    // note above for what happens when it doesn't.
+    shade = mix(1.0, lit, bead) * lightLift;
 
     // Hue dominates `t` and the body shading stays out of it. That split
     // matters more than it looks: `t` is the palette coordinate, so anything
@@ -861,13 +890,9 @@ static inline float tunnelField(float2 p, float drift, float breathWave,
     // read as coloured glints rather than as a gradient, and the fact that they
     // move `t` by different amounts is exactly what makes them different
     // colours — which is the one thing that says glass.
-    // Every weight here is a move along the palette, so they are all kept
-    // small enough that the sum stays inside one trip through the ramp. The
-    // highlights in particular were nearly a quarter of it each, which turned
-    // every glint into its own colour band — they carry their brightness
-    // through `detail` instead, which lifts without moving the hue much.
+    // Every weight here is a move along the palette, and there are almost none
+    // left. A bead's colour is the light's colour where it sits, full stop.
     return bead * (0.14 + 0.86 * spiral)
-         + s1 * 0.10 + s2 * 0.07 + rim * 0.06 + env * 0.09
          + mortar * 0.26
          + depth * 0.08;
 }
@@ -1048,14 +1073,22 @@ static inline float mycelialLayer(float2 p, float drift, float churn,
     // the threads came out as long parallel arcs sweeping across everything —
     // brushed hair, not a mat. It has to turn several times within the frame
     // for the rotation to be doing its job.
-    float turn = fbm3(q * 3.2 + 21.7) * 2.4;
+    // One field, two jobs. `turn` and the thread wander below both want a
+    // noise field at roughly this frequency, and this function is evaluated on
+    // most of the screen — a whole fbm3 is twelve hashes, which is a real cost
+    // to pay twice for two things that only differ by a scale factor.
+    float fieldA = fbm3(q * 3.6 + 21.7);
+    float turn = fieldA * 2.4;
 
     // The wander is much larger than it was, and higher frequency with it. At
     // 3.4 the perturbation was a fifth of a line spacing — enough to make the
     // lines waver, nowhere near enough to stop them being lines. This is about
     // three spacings, so a thread crosses its neighbours' paths instead of
     // running parallel to them forever.
-    float nz = fbm3(q * 4.0) * 9.0;
+    // A second fbm3 here would undo the saving above — twelve more hashes for
+    // a term whose only job is to shove the threads sideways. One octave of
+    // plain noise on top of `fieldA` is indistinguishable at this amplitude.
+    float nz = (fieldA * 1.7 + valueNoise(q * 7.3) * 0.55) * 6.0;
     float threads = 0.0;
     for (int k = 0; k < 5; k++) {
         float fk = float(k);
@@ -1157,7 +1190,11 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             // time to be. Clamping the projection to `reveal` rather than to 1
             // is the whole of "it extends" — the far end is the growing tip and
             // it moves.
-            float bend = (hash21(float2(idx, 27.3)) - 0.5) * TREE_BEND;
+            // One hash, two uses. The fractional part after scaling is
+            // uncorrelated with the value itself, which is enough decorrelation
+            // for a bend and a stunt roll and saves a hash per level.
+            float hb = hash21(float2(idx, 27.3));
+            float bend = (hb - 0.5) * TREE_BEND;
             float ty = clamp(q.y / len, 0.0, reveal);
             float d  = length(q - float2(bend * ty * ty * len, ty * len));
             float w  = wid * (1.0 - 0.35 * ty);   // and it tapers along itself
@@ -1204,8 +1241,14 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             // branch's chord. That one rotation is what carries the bend
             // through the fork: without it every branch straightens out at
             // every junction and the tree goes back to being made of sticks.
-            float ta = atan(2.0 * bend);
-            float ct = cos(ta), st = sin(ta);
+            //
+            // The obvious spelling is atan(2*bend) then sin and cos of it —
+            // three transcendentals in a loop that runs thirty times a pixel.
+            // But the slope IS the tangent of that angle, so the frame falls
+            // straight out of it: cos = 1/sqrt(1 + slope^2). One reciprocal
+            // square root, which the GPU does in hardware.
+            float ct = rsqrt(1.0 + 4.0 * bend * bend);
+            float st = 2.0 * bend * ct;
             q = float2(q.x * ct - q.y * st, q.x * st + q.y * ct);
 
             // ── The half-angle belongs to the FORK, not to either child ────
@@ -1241,10 +1284,10 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             // Length jitter, half of it shared by the fork and half the child's
             // own. The shared half is free; the child's own half moves the tip
             // and so nudges the next bisector, which is why it is the smaller
-            // of the two.
+            // of the two. The child's half reuses h2 rather than hashing again.
             len *= TREE_SHRINK * live
                  * (0.80 + 0.40 * hp)
-                 * (0.88 + 0.24 * hash21(float2(idx, 19.1)));
+                 * (0.88 + 0.24 * fract(h2 * 31.7));
             wid *= TREE_TAPER;
         }
     }
