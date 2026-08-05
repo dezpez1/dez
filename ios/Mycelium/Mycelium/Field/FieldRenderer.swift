@@ -194,7 +194,7 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                 // is how far taps have shoved the camera back in octaves, and
                 // the delta is this frame's share of that — the feedback trail
                 // needs it or the ghost lags behind during a pullback.
-                colony: SIMD4(state.colonyReach, state.zoomPush,
+                colony: SIMD4(state.colonyGrowth, state.zoomPush,
                               state.pushDelta, 0),
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),

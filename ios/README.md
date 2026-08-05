@@ -228,15 +228,19 @@ Most of the feel lives in a handful of constants:
 | how hard a tap hits *per form* | `GLOW_ORGANIC` / `GLOW_STRUCTURED` |
 | kaleidoscope zoom speed | `KALEIDO_ZOOM_RATE` — octaves per second, currently 0.20 (a doubling every 5s). Past ~0.25 it stops being hypnotic and starts feeling like falling. **Changing this alone is enough; the feedback trail follows it automatically** |
 | how much of the kaleidoscope is flat wash | `trapSum` in `kaliLayer` and its two weights. The min-traps go quiet where the orbit settles early; this one keeps accumulating and is what puts structure in those regions. **Weight it into `detail`, not `t`** — see below |
-| mycelial retreat speed | `MYCELIAL_GROW_RATE` — the same mechanism run backwards, currently 0.045. **This is not the perceived rate**, see below. It is also the clock every `AGE_*` constant is measured against |
-| the colony's size, growth and tap response | `Colony` in **`FieldState.swift`**, not the shader — `start`, `full`, `regrowTau`, `tapPullback`, `pushRate`, `floorReach`. A tap changes these and a tap is an event; the shader has nowhere to keep one |
-| how ragged the growing margin is | `COLONY_BRANCH_ANG` (**must be a whole number**) and `COLONY_BRANCH_RAD` shape the fingers. See below for why it's log-polar |
-| how *branched* it looks | `COLONY_RESIST` — how much harder the worst direction is than the best. 0 is a circle; above ~8 it's a starfish. `COLONY_RESIST_YOUNG` is the same knob for a seedling, where a starfish is right |
-| the connectivity march | `COLONY_STEP` / `COLONY_MARCH_MAX`, and `COLONY_SEED` / `COLONY_SPAN`. **Read the note below before touching any of them** — the guarantee that nothing appears in mid air lives in the shape of this loop |
+| the colony's shape | `TREE_TRUNK`, `TREE_SHRINK`, `TREE_SPREAD`, `TREE_BEND` in `Field.metal`. BEND is what stops it being a diagram of a tree; **read the note below before removing the tangent rotation that goes with it** |
+| how thick the cords are | `TREE_WIDTH` and `TREE_TAPER` |
+| how ragged the rim is | `TREE_STOP` and `TREE_STUNT` — a ninth of tips give up. **Stunted, never terminated**, see below |
+| how much it webs vs. how much it's a tree | `TREE_HALO` and `TREE_HALO_FLOOR`. The floor is the one that matters: it's what lets neighbouring limbs' sheaths overlap and bridge |
+| how far the colony gets, and how fast | `Colony` in **`FieldState.swift`**, not the shader — `levels`, `genSeconds`, `genShrink`, `genFloor`, `tapPullback`, `levelsPerOctave`. `levels` is a **legibility** budget, not a coverage one; see below |
 | brightness of the growing edge | `MARGIN_LINE` |
-| how growth stages behind the margin | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE`, `AGE_SETTLE` — in octaves of retreat, so ~22s each at the current rate. This staging is the whole growth model, see below |
-| how legible the deep interior is | `MAT_SETTLED_DIM`, `MAT_FINE_SETTLED`, `MAT_CELL`, `MAT_GAMMA`. **Read the note below before touching these** — they're the answer to "there's too much going on to see the branching", not decoration |
+| how growth stages behind each tip | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE`, `AGE_SETTLE` — in **levels**, not seconds, so a trunk spends far longer thickening than a twig does |
+| the mat texture on the cords | `MAT_SETTLED_DIM`, `MAT_FINE_SETTLED`, `MAT_CELL`, `MAT_GAMMA`, `MAT_THREAD_FREQ`, `TREE_TEX_SCALE`. The Worley layer is a sheath now, not the form |
 | tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
+| the wave running down the corridor | `TUNNEL_WAVE_A` / `_K` / `_RATE` / `_TILT`. A×K is how much it stretches the rows; TILT **must be a whole number**. This is the one warp free to have real amplitude — see below |
+| how much the beads spin | `TUNNEL_TWIST` and the `drift` rates on the lobes. All roughly halved once the wave was carrying the motion |
+| bead shape | `TUNNEL_SQUARE` (0 = circles, 1 = a rounded square) and `TUNNEL_CYL` (0 = sphere, 1 = a rod). CYL is what makes the highlight a line instead of a dot |
+| the colour, which belongs to the room | `TUNNEL_SPIRAL_R` / `_A` / `_RATE` and `TUNNEL_REFLECT`. **All four are capped by the same thing** — a bead that spans much of the palette is a rainbow however the colour got there. See below |
 | tunnel bead count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW`, which is *derived*: `(TAU / COLUMNS) * 0.866` for a staggered circle packing. Move one and the other has to follow |
 | tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways. Capped by the packing, see below |
 | tunnel flow | `TUNNEL_LOBES` (**must be a whole number**), `TUNNEL_LOBE_R`, `TUNNEL_LOBE_A`. Amplitude is capped by shape, not taste — see below |
@@ -298,9 +302,14 @@ than a mat. It has to turn several times within the frame to be doing anything.
 
 ### How the endless zoom works
 
-Two forms use this, in opposite directions. The kaleidoscope magnifies forever;
-mycelial retreats forever. Both render their field **twice per frame, exactly
-one octave apart**, and cross-fade:
+The kaleidoscope uses this. Mycelial used to, in the opposite direction, and
+**the removal is written up under "Tap to make room"** — the constant retreat was
+most of why that form read as expanding rather than growing. What follows is
+therefore about the kaleidoscope, and the measurements below were taken on
+mycelial back when it ran the same machinery.
+
+The field is rendered **twice per frame, exactly one octave apart**, and
+cross-faded:
 
 ```
 // kaleidoscope — falling in
@@ -309,8 +318,8 @@ near = kali(q * exp2(-k))        // scale 1.0 → 0.5
 far  = kali(q * exp2(1 - k))     // scale 2.0 → 1.0
 out  = mix(near, far, k)
 
-// mycelial — pulling back. Same construction, mirrored.
-k = fract(time * MYCELIAL_GROW_RATE)
+// the retreat is the same construction, mirrored — this is what mycelial ran
+k = fract(time * RATE)
 near = layer(p * exp2(k))        // scale 1.0 → 2.0
 far  = layer(p * exp2(k - 1))    // scale 0.5 → 1.0
 out  = mix(near, far, k)
@@ -347,7 +356,7 @@ mycelial by correlating frames against rescaled later frames and finding the pea
 
 | | nominal | measured |
 |---|---|---|
-| over 6s at `MYCELIAL_GROW_RATE = 0.045` | 1.206× | **1.060×** (r = 0.987) |
+| over 6s at a nominal 0.045 octaves/s | 1.206× | **1.060×** (r = 0.987) |
 | over 2s | 1.064× | 0.97–0.98× |
 
 The cause is the cross-fade itself. Within one octave the weight slides from the
@@ -385,12 +394,13 @@ zoom completely. The contraction is now `exp2(-KALEIDO_ZOOM_RATE * dt)` for that
 form, using the real frame delta passed in `holdParams.z`, so history lands
 exactly where the pattern is going.
 
-Mycelial gets the same treatment with the **sign flipped**:
-`exp2(+MYCELIAL_GROW_RATE * dt)`. Under 1, history is sampled inward and so
-drifts outward, which is where the kaleidoscope is heading as it magnifies.
-Mycelial retreats — everything on screen travels inward — so its history has to
-travel inward too, and that needs a factor above 1. Getting this sign wrong
-doesn't look like a bug; it looks like the form is merely blurry.
+The sign is worth understanding even now that only one form zooms. Under 1,
+history is sampled inward and so drifts outward, which is where the kaleidoscope
+is heading as it magnifies. A form that *retreats* — everything on screen
+travelling inward — needs a factor above 1 instead. Mycelial ran that way for
+three versions and its trail is now `exp2(pushDelta)`, which is exactly 1 at rest
+and above it only during a tap pullback. Getting this sign wrong doesn't look
+like a bug; it looks like the form is merely blurry.
 
 If you add a form that moves the whole field coherently, it needs the same
 treatment. A fixed contraction only works for forms that churn in place.
@@ -439,188 +449,208 @@ fractal stops being the thing choosing the colours and the palettes stop meaning
 what they were tuned to mean. That was tried at 2.2 and every palette went gold.
 `detail` lifts brightness and leaves hue alone, which is the job.
 
-### Growth, and why a moving boundary isn't it
+### The colony is a tree
 
-The first two versions of this treated growth as a mask. A ragged circle got
-bigger and uncovered a mat that had been sitting there the whole time — which is
-exactly what it looked like, and the note it drew back was that the form read as
-"a pre-defined grid that was already set in place and is just getting bigger."
-Nothing about the mask was wrong. The mistake was thinking growth is a boundary
-at all.
+Three versions of this form treated growth as a **region** — a boundary that
+advanced, with mat drawn inside it. All three failed, and the last two failed in
+ways that are worth keeping because each one looked like a tuning problem and
+wasn't.
 
-**Growth is what a patch of mat has had time to do**, and because the retreat
-rate is a known constant, that comes for free:
+**Version one** was a mask: a ragged circle got bigger and uncovered a mat that
+had been sitting there the whole time. Which is exactly what it looked like, and
+the note it drew back was that the form read as "a pre-defined grid that was
+already set in place and is just getting bigger."
 
-```
-age = log2(frontEff / r)      // in octaves of camera retreat
-```
+**Version two** replaced the mask with an age model. A point's age was
+`log2(front / r)` — how many octaves ago the retreating camera carried it past
+the margin — so cords could arrive thin and thicken in place instead of being
+revealed. Better, and it introduced a new bug: the test at a point never asked
+about the points *between* it and the middle, so wherever the noise peaked, mat
+appeared with nothing joining it to anything. Branches materialising in mid air.
 
-A point sitting at screen radius `r` inside a margin at `frontEff` crossed that
-margin exactly `log2(frontEff / r)` octaves ago, because the retreat is the thing
-that carried it inward. One logarithm, no state, no simulation — every pixel
-knows its own age. At `MYCELIAL_GROW_RATE = 0.045` an octave is about 22
-seconds, which is the unit every `AGE_*` constant is written in.
-
-Everything else is that age driving what has had time to appear:
-
-| age | what happens |
-|---|---|
-| `AGE_EMERGE` ~1s | a cord fades up at the tip |
-| `AGE_TIP` ~2.4s | the bright growing edge trails behind it |
-| `AGE_MID` ~7s | the mid net starts filling in |
-| `AGE_THICK` ~13s | cords reach full width, from 28% at the tip |
-| `AGE_FINE` ~18s | the fine hyphae fill the cells, last |
-| `AGE_SETTLE` ~38s | and then the mat quiets down again |
-
-The staging is the point, and the cord *width* ramp is the load-bearing half of
-it. A hypha at the tip is a thread and the same hypha a minute later is a rope;
-fade a full-width cord up instead and it reads as something being switched on
-rather than something extending. Turn all three nets on at once and the colony
-simply materialises at full complexity wherever the margin happens to be — which
-is the "already there, just uncovered" read, arrived at from a different
-direction.
-
-#### Making the interior legible
-
-Rendered at one intensity everywhere, the deep interior of the mat is so dense
-that the branching cannot be read through it. The margin was the only part
-anyone could follow — and the margin is a thin ring around a screenful of noise.
-Three changes, all of them legibility decisions before they're aesthetic ones:
-
-- **Old mat quiets down.** Past `AGE_SETTLE` it loses most of its fine hyphae
-  and drops to `MAT_SETTLED_DIM` brightness, so the light is where the growth
-  is. This also happens to be true of the real thing: the active edge is the
-  bright part.
-- **Fewer, larger cells** (`MAT_CELL`). The old frequencies put around fifteen
-  coarse cells across a screen — a convincing mat, and too many to follow. Ten
-  still reads as grown rather than drawn (four would be a diagram) and leaves
-  each cord long enough to trace from one junction to the next.
-- **Crushed mid-tones** (`MAT_GAMMA`), so cords separate from the fuzz instead
-  of sitting in the same tonal band as it.
-
-The test for all three: can you pick one cord at the margin and follow it inward
-through two junctions? If not, they've drifted back.
-
-#### Nothing appears that isn't connected to something
-
-The version before this thresholded a radius: a noise field said how far the
-colony had got at each angle, and anything inside that was grown. It looked like
-branching and it wasn't, because **the test at a point never asked about the
-points between it and the middle.** Wherever the noise peaked, mat appeared with
-nothing joining it to the rest — branches materialising in mid air.
-
-The fix is to stop asking *is this point inside the margin* and start asking
-*how hard was it to get here*:
+**Version three** fixed that with a cost march. A point's age became the budget
+minus what the journey out to it cost:
 
 ```
 cost(r) = integral from the seed out to r of (1 + RESIST * resistance)
 ```
 
 The integrand is strictly positive, so cost only ever increases going outward,
-and that single property is the whole guarantee: the grown region is an interval
-along every ray, so it's star-shaped, so every grown point has an unbroken trail
-of grown material back to the middle. Connectivity is never checked or enforced
-anywhere — it cannot fail. Branching survives and now happens for the right
-reason: growth runs far up the cheap channels and stalls in the expensive ones,
-and the channels fork.
+so the grown region is exactly one interval along every ray. Star-shaped, and
+therefore connected by construction — nothing checked it and nothing could break
+it. It was a real guarantee and it held.
 
-**Fixed step size, not a fixed sample count**, and this is the part that bites.
-Spreading N samples across the whole span — the obvious midpoint rule — moves
-every sample point as the radius grows, so the quadrature error wanders with it.
-Six samples of a noisy integrand wander enough that cost sometimes *decreases*
-outward, and every place it does is an island with a gap behind it: the exact
-bug this march exists to prevent, reintroduced by the arithmetic. Fixed
-positions mean going outward only ever adds terms, so the sum is monotone by
-construction rather than by luck.
+**And it is precisely why that version could never web.** A star-shaped set whose
+boundary is a function of angle is a blob with a wiggly edge. There is no
+branching topology anywhere in it — no junction, no fork, nothing that is the
+child of anything. What looked like branching was the Worley mat underneath,
+which is a space-filling foam drawn everywhere the blob had reached, and the
+blob itself just got steadily bigger. That is what "it's slowly expanding, it's
+not webbing" is describing, and no amount of moving the resistance knob was ever
+going to reach it.
 
-`COLONY_MARCH_MAX * COLONY_STEP` must cover the widest span that can be on
-screen. Past it the field returns unreached rather than trusting a truncated
-integral — an undercounted cost reads as *grown*, which is the worst way for
-this to fail.
+So the colony is a tree now. An actual one, with a root and children.
 
-**Two unit traps, both found by looking.** `budget` and `cost` are in cost
-units, which inflate with `RESIST` — left unnormalised, a fourteen-second-old
-seedling's centre came out twenty-six octaves old and rendered as fully settled
-mat. And nothing capped age to how long the colony had actually existed, so a
-fresh session arrived pre-aged; `min(age, time * MYCELIAL_GROW_RATE)` fixes that.
+#### One iteration per level, not one per branch
 
-**Proving it, rather than arguing it.** The claim was checked by temporarily
-rendering the mask alone — `age > 0` as flat white — which showed a single
-connected star with no islands. Worth doing again after any change here, because
-the failure is invisible in a normal render: what you see instead is scraps.
+Ten levels of binary branching from three trunks is about three thousand
+branches, and a fragment shader cannot test three thousand of anything. It does
+not have to. Every level of a binary tree splits space roughly in half, so a
+pixel can walk *down* the tree instead of scanning it: measure the branch you're
+on, step to its tip, decide which of the two children you're nearer, repeat in
+that child's frame. Ten iterations, not three thousand.
 
-#### The advancing front is drawn, not implied
+The step that does the deciding is `q.x = abs(q.x)`. After moving the origin to
+the tip and orienting the fork symmetrically, folding the negative half onto the
+positive one **is** the choice of nearer child, and it costs an absolute value.
+Everything else in the loop is bookkeeping to keep the frames straight.
 
-Even with a provably connected mask, the *render* can look disconnected. Every
-other term is the mat multiplied by an age factor, so a finger whose tip lands
-on a cell interior renders near black and the fingertip beyond it reads as a
-detached scrap — the mid-air-branch complaint arriving through the renderer
-instead of the model.
+Growth is then not a boundary at all. `grown` is how many levels have arrived, as
+a real number, and the fractional part is how far the newest branches have
+extended out of their parents:
 
-`frontLine` (`emerge * tip`, scaled by `MARGIN_LINE`) draws the margin as a
-thing in its own right, independent of what the mat happens to contain there.
-It's also truer: a real colony's leading edge is a continuous advancing hyphal
-front, brighter than anything behind it.
+```metal
+float reveal = clamp(grow - float(i), 0.0, 1.0);
+if (reveal <= 0.0) break;
+float ty = clamp(q.y / len, 0.0, reveal);   // the tip, and it moves
+```
 
-#### The margin, and why fingers need two dimensions
+Connectivity is no longer a property that has to be argued from an integral. A
+level-n branch is a segment starting at the tip of its level-(n-1) parent, and it
+cannot be drawn until its parent is complete. Nothing appears detached from
+anything because **there is nowhere for a detached thing to live.**
 
-**Ridged noise, not fbm.** A ridged field's high ground is a *connected network
-with junctions*, so a boundary riding on it throws fingers that split. Plain fbm
-has closed level sets and can only ever give you an amoeba.
+#### The fold is only a bisector if the fork is symmetric
 
-**In log-polar, not on a circle.** The version before this sampled one ridge
-field on the unit circle (identical at every radius, so radial) and one on the
-plane, and multiplied them. Cheap, and wrong in a way that took a while to see —
-*a field sampled on a circle is one-dimensional, and a one-dimensional ridge
-field has no junctions at all.* It can only produce isolated spikes, which is
-exactly what it produced: fingers that were individual thin lines rather than
-anything branching.
+This one cost a probe build to find, and it is the single most important thing on
+this page if you ever touch `mycelialTree`.
 
-The fix is a genuinely 2-D ridge field in `(log r, theta)`. That space is
-conformal to the screen, so a feature that's long in the log-radius axis and
-narrow in the angular one comes back as a finger reaching outward — at every
-radius, with a real ridge network's junctions in it, and without any of it being
-drawn as a line. `COLONY_BRANCH_RAD` sets how stretched: a feature spans
-`r/RAD` radially against `r*TAU/ANG` tangentially, so smaller is longer.
+The obvious way to stop a folded tree looking mirrored is to give each child its
+own branch angle from a hash of its own path. Do that and the true bisector
+between the two children is no longer the x axis — so `abs` sends a good fraction
+of space down the **wrong** subtree. Those pixels then find themselves nowhere
+near anything, and because the fold's cells are bounded by straight lines, what
+that looks like is hard-edged black polygons cut clean through the colony,
+running right off the frame.
 
-`COLONY_BRANCH_ANG` **must be a whole number**, because one of those axes is an
-angle. `ridgedP` wraps its lattice *index* by exactly that value rather than
-wrapping the coordinate — the cells either side of the seam really are the same
-cells, so there's nothing to blend and nothing to show. The octave step is
-exactly 2.0 and the period doubles with it, so every octave stays whole.
+They looked like a rendering bug, or a stale-history bug, or an aliasing bug.
+What settled it was rendering the branch-density field on its own — flat gold
+wherever the descent found material, black where it didn't — which showed the
+voids were structural, with straight edges and bisector fans radiating from
+branch tips. That probe is two lines and worth rebuilding any time this form
+grows holes:
 
-(The old form of this bug is worth remembering too: an angle taken straight out
-of `atan2` jumps a full turn across the negative x-axis, and any noise driven by
-it leaves a hard seam down that line. That shipped once.)
+```metal
+    TreeHit h = mycelialTree(p, grown, drift);
+    detail = 0.0;
+    if (h.age <= 0.0) return 0.0;
+    return clamp(h.dens * 3.0, 0.0, 1.0);   // PROBE
+```
 
-**The margin has to be measured in screen space, not world space.** The camera
-is retreating at the same time, so a margin pinned in world space gets dragged
-inward and shrinks to a dot however fast you grow it.
+The fix: **the half-angle belongs to the fork, not to either child.** Both leave
+at the same angle from the tangent, in opposite directions, which makes `abs` the
+exact bisector again. The asymmetry then has to come from somewhere the fold
+doesn't depend on — length, curvature, and the subtrees themselves, all of which
+still differ per child. Siblings are not mirror images; the *decision boundary*
+between them is.
+
+The same logic is why dead tips are stunted rather than terminated. Ending the
+descent at a dead tip leaves the whole region that subtree would have served with
+nothing, bounded by the same straight lines. A stunted branch still has its
+subtree, folded into a knot a third of the size, so there is always something
+there.
+
+#### A sum where a minimum was
+
+The cord itself is drawn from the nearest branch — a minimum. The fuzz around it
+is not, and the difference is not cosmetic.
+
+A minimum taken over a path that commits to a side at every level *jumps*
+wherever the commitment flips. While the fuzz was tight to the cords that jump
+happened where both branches were far away and nothing was being drawn, so it
+never showed. Widening the sheath so it bridges between limbs — which is what
+makes this a web rather than a tree — put the discontinuity right in the middle
+of visible material, as straight seams.
+
+So the sheath comes from `hit.dens`, summed over every branch the descent passes,
+each weighted by its own thickness and age. A sum has no such flip: when the path
+switches, the terms from the shared ancestors are unchanged and dominate, and the
+one term that differs is the far one, which is near zero either way.
+
+```metal
+float hw = w * TREE_HALO + TREE_HALO_FLOOR;
+float rr = d / hw; rr *= rr;
+hit.dens += smoothstep(0.0, AGE_MID, age) / (1.0 + rr * rr);
+```
+
+Fourth power rather than an exponential: same tight core, much heavier tail —
+which is the half that reaches across the gaps — and no transcendental in a loop
+that runs thirty times.
+
+`TREE_HALO_FLOOR` is the part that makes it a web. A halo that scales purely with
+branch width leaves the voids between major limbs completely empty, and a tree
+with clean black gaps between its limbs is a tree, not a mycelium. At 0.021 the
+sheaths of neighbouring limbs overlap and the Worley layer — which is
+space-filling, and was the whole form once — runs continuously across the gap as
+fine hyphae bridging between cords.
+
+#### Straight segments are the tell
+
+A fractal tree built from segments has hard angular kinks at every fork, and no
+growing thing does that: a hypha is laid down by a tip that is steering as it
+goes, so it arrives somewhere curved. Rendered straight, the first working
+version of the tree read as a diagram of a tree rather than a tree.
+
+Each branch is a parabola now, `TREE_BEND` wide at the tip, and the distance is
+measured to the curve point at the straight projection's parameter rather than to
+the true nearest point — off by O(bend²), which at this amplitude is well inside
+the width of the cord being drawn.
+
+The half that matters more is the **tangent**: the child frame is rotated by the
+slope at the tip, not by the branch's own chord. Without it every branch
+straightens out at every junction and the tree goes back to being made of sticks.
+With it, a limb reads as one continuous sweep that happens to shed side branches,
+which is what a real cord looks like.
+
+#### Levels are a legibility budget, not a coverage one
+
+`Colony.levels` is where the colony stops. Coverage — the point where the tree
+spans the frame — happens around level seven. Every level after that doubles the
+branch count inside the same disc, so at twelve the colony came out as a full
+screen of dense mat with no branching legible in it at all. Which is the same
+complaint the whole form has been answering, arriving from the other direction.
+
+Ten spans the frame and stops while the structure can still be read. The test is
+unchanged from the earlier versions: **can you pick one cord at the margin and
+follow it inward through two junctions?**
+
+The clock is in `Colony` in `FieldState.swift`, and it is per level rather than
+per second, because the thing that is actually constant is the speed of a growing
+tip. Branch lengths shrink by `TREE_SHRINK` each level, so a deeper branch is
+shorter and takes proportionally less time to put out. Growing every level in the
+same wall-clock time instead makes the twigs crawl and the trunk snap out, which
+is backwards. Five and a half seconds for the trunk is the whole of "start with a
+single line": for the first five seconds there is one filament on screen and
+nothing else, and the other two trunks are held back half a level each so it
+isn't a three-pointed star either.
 
 #### Tap to make room
 
-At rest the mat owns the whole frame — which is what it should do, and also
-means the only part of it that's *doing* anything is off-screen. So a tap shoves
-the camera back by `Colony.tapPullback` octaves, the mat shrinks to a blob, and
-it has to grow into the frame again over the next twenty-odd seconds.
+The colony fills the frame and then sits there, which is a finished thing to look
+at and nothing to do. A tap shoves the camera back — `zoomPush`, in octaves —
+which shrinks the colony on screen, and shrinking it is exactly what buys room
+for finer levels: an octave of pull-back is worth `ln2 / -ln(TREE_SHRINK)` = 4.98
+more of them. So the tap gets you a smaller colony **and** somewhere new for it
+to grow, and it grows there over the next few seconds.
 
-This is why `Colony` lives in `FieldState.swift` and not in the shader: a tap is
-an event, and the shader is a pure function of what it's handed with nowhere to
-keep a consequence. Three things make it work:
+The camera is otherwise completely still, and that stillness is half of why this
+form reads as growing now. The version before it cross-faded two octaves of mat
+while retreating at a constant rate, so every pixel on screen drifted outward at
+the same speed forever. That is a zoom. Growth is tips extending into empty space
+while everything behind them stays exactly where it is, and you cannot have both.
 
-- **The pullback is added to the zoom phase**, `fract(time * RATE + push)`. The
-  octave cross-fade is seamless at *every* value of k, so the camera can be
-  shoved anywhere along the zoom at any moment and there is nothing to stitch.
-- **Reach and camera are driven off the same eased delta**, rather than the
-  reach being set outright at the moment of the tap. The mat shrinks at exactly
-  the rate the view pulls back, so the margin never slides against the texture.
-- **The feedback contraction gets this frame's share of the push.** Without it
-  the trail stays locked to the idle retreat while the camera is doing something
-  four times faster, and the one moment the view really moves is the one moment
-  the ghost lags behind it.
-
-Gated on the form in `addBloom`, or tapping the kaleidoscope would quietly
-shrink a colony you aren't looking at and you'd come back to a speck.
+The feedback trail follows `pushDelta` and nothing else, so it is stationary at
+rest and locked to the camera during a pullback.
 
 ### The tunnel, and why it's the cheap one
 
@@ -704,38 +734,86 @@ terminator, plus contact shading toward each bead's silhouette — a sphere is
 legible as a sphere because of where it goes **dark**, and nothing that only
 brightens can say that.
 
-#### Making it flow instead of spin
+#### A wave that stretches instead of shears
 
 A rigid lattice being rotated reads exactly like a rigid lattice being rotated —
-marbles spinning, not a corridor flowing. The lobes bend the log-polar
-coordinates *before* anything is tiled, so the whole packing waves: rows swell
-and pinch, beads slide against their neighbours, and their highlights travel
-across them because the surface underneath moved.
+marbles spinning, not a corridor flowing. Two mechanisms bend the log-polar
+coordinates *before* anything is tiled, so the whole packing waves rather than
+the beads being animated individually. They are not interchangeable.
 
-**`TUNNEL_LOBES` must be a whole number**, same rule as `TUNNEL_COLUMNS` and for
-the same reason — it's driven off the raw angle, which jumps a full turn at the
-seam, and `sin(a * L)` only survives that if `L` is an integer.
+**The lobes bend the angle**, and that shears. The warp is not conformal: its
+derivative with respect to the angle tilts the row axis, so a bead that is a
+circle in the warped coordinates comes back as an ellipse, and the stretch scales
+with `LOBE_R * LOBES`. At 0.085 with three lobes every bead was an egg. The
+useful amplitude is tiny, which is why the lobes could never be the wave.
 
-**Amplitude is capped by shape, not taste.** The warp is not conformal: its
-derivative with respect to the angle shears the row axis, so a bead that is a
-circle in the warped coordinates comes back as an ellipse, and the stretch
-scales with `LOBE_R * LOBES`. At 0.085 with three lobes every bead was an egg
-and the packed-marble read was gone.
+**The travelling wave only moves the log-radius**, and its derivative is a pure
+stretch along the row axis: rows bunch up and spread apart as it passes and the
+beads keep the shape they had. Amplitude is therefore free in a way the lobes'
+never was, and `TUNNEL_WAVE_A * TUNNEL_WAVE_K` — the stretch, about a sixth — is
+the only thing bounding it. It runs at `RATE / K` = 0.31 log-radius per second
+against the beads' own 0.096, so it visibly overtakes them: the corridor flexes
+and the beads ride it, rather than the whole lattice sliding as one piece.
 
-Two other things sell the material, and both are about what the pattern is a
-function of:
+Once the wave was carrying the motion, every rotation rate came down by about
+half. What they had been adding was spin, and spin was the complaint.
 
-**The beads each change colour at their own rate.** Two hashes, not one — the
-second gives every bead its own speed to travel its hue at, so they never come
-round together. A shared rate is a whole-field rhythm, which is the thing this
-shader must never have, and the version before this had every bead sitting on
-its colour and staying there, which is most of what made them look painted.
+**`TUNNEL_LOBES` and `TUNNEL_WAVE_TILT` must both be whole numbers**, same rule
+as `TUNNEL_COLUMNS` and for the same reason — they multiply the raw angle, which
+jumps a full turn at the seam, and only an integer multiple survives that.
 
-**The reflection is looked up by the surface normal, not by position.** That's
-the part that reads as reflective: the bands are fixed in the world, so they
-slide across a bead whenever the surface under them turns and two neighbours
-show different parts of the same room. A pattern in bead-local coordinates looks
-like decoration on the ball however shiny you make it.
+#### Cylinders, and why the highlight is a line
+
+`u`, the round silhouette coordinate, and the surface **normal** are two
+different questions, and answering them with the same value is what makes a
+packing read as marbles. A sphere's normal turns in both directions at once and
+its highlight is a dot. A cylinder's turns in one, its face stays flat along its
+length, and its highlight is a *line* down the axis — which is the whole visual
+signature of a polished rod.
+
+`TUNNEL_CYL` is how much of the second. At 0.65 the surface bends mostly across
+the corridor, each bead carries one long straight glint running outward, and its
+radial ends stay flat and bright the way a cut rod's do. The silhouette, the rim,
+the contact shading and the anti-aliasing all still use `u`, because those are
+about the outline and the outline hasn't changed.
+
+`TUNNEL_SQUARE` closes the packing without moving any centres: a square of
+half-width 0.5 reaches 0.71 into its corners, so the triple-point gaps shrink and
+neighbours meet along longer flats. The metric has to be the same one the
+nine-way nearest-centre test uses, or the assignment and the silhouette disagree
+and beads get clipped against cells they don't belong to.
+
+#### Colour that belongs to the room, not to the bead
+
+The version before this hashed a hue per cell — a jar of mixed marbles, every one
+a painted object carrying its own colour around. What a reflective object
+actually does is the opposite: it has no colour, it shows you the colour of
+what's around it, and the colour therefore belongs to the *room* and stays put
+while the objects move through it.
+
+So the palette coordinate is a logarithmic spiral, which in log-polar coordinates
+is a straight line and costs one sine, built from the log-radius from **before**
+the wave and the lobes bent it — so the colour field stays a clean spiral while
+the lattice flexes underneath it, rather than pumping along with the rows. It
+travels outward slower than the beads do, so they slide through it.
+
+The reflection is then the spiral looked up through the surface **normal** rather
+than the position. That's the part that reads as reflective: the bead is showing
+a bent, compressed image of the arm behind it, so the colour travels *across* it
+as the surface turns, and the two ends of the same rod come out different
+colours. A pattern in bead-local coordinates looks like decoration on the ball
+however shiny you make it.
+
+**All four of these constants are capped by the same thing, and it caught this
+form twice.** These palettes run about one full cycle over `t` in 0..1. Anything
+that sweeps most of that range across a *single bead* puts a complete rainbow on
+every bead — which is exactly what the per-bead hue hash was replaced to stop,
+arriving by a different route. It happened first through `TUNNEL_REFLECT` at
+1.55, and again through the two specular highlights, which were adding nearly a
+quarter of the ramp each and turning every glint into its own colour band. The
+rule: `SPIRAL_R`, `SPIRAL_A` and `REFLECT` together should move `t` by well under
+half a cycle across one bead, and brightness that isn't meant to change hue goes
+through `detail`, which lifts without moving along the palette.
 
 #### Keeping the vanishing point alive
 

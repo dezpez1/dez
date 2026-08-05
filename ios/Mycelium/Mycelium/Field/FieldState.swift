@@ -45,38 +45,50 @@ enum Breath {
 /// the margin back inside the frame, and the colony has to grow into the space
 /// again. So the form is a settled mat you can always give something to do.
 enum Colony {
-    /// Screen radius in field units, where the visible area is ~0.46 wide and
-    /// 1.0 tall — the corners sit at ~0.55.
-    ///
-    /// `start` is deliberately tiny. Below COLONY_SEED * e^COLONY_SPAN (~0.29)
-    /// the shader counts growth from a fixed speck rather than from a radius
-    /// that scales with the colony, and it runs the resistance contrast far
-    /// higher — so the first thing on screen is one filament finding its way
-    /// out, not a small copy of a finished mat.
-    static let start: Float = 0.045
-    /// Past the corners on purpose: at rest the mat owns the whole frame.
-    static let full: Float = 0.86
-    /// However many times it gets tapped, the colony never shrinks to nothing.
-    static let floorReach: Float = 0.17
+    /// How many levels of the tree have arrived, as a real number — the
+    /// fraction is how far the newest branches have extended out of their
+    /// parents. This is the only growth state there is; the shader gets this
+    /// one float and derives every age on screen from it.
 
-    /// Octaves of radius per second. **Multiplicative, not an approach toward a
-    /// target**, and the difference is the entire seedling phase.
+    /// Seconds the trunk takes to extend, and the ratio per level after it.
     ///
-    /// An exponential approach covers most of the absolute distance first,
-    /// because that's where the gap is biggest — from a speck to a third of the
-    /// screen took under two seconds, so the one-filament stage was over before
-    /// anyone saw it. A colony doubles; it doesn't add inches. At a constant
-    /// 0.10 octaves/sec the whole run from seed to full frame takes ~42s, the
-    /// seedling stage lasts ~25s of it, and one tap's worth of pullback grows
-    /// back in ~6s.
-    static let growOctavesPerSecond: Float = 0.10
+    /// Not a constant rate per level, and that is the point: **the tip speed is
+    /// what's constant.** Branch lengths shrink by TREE_SHRINK each level, so a
+    /// deeper branch is shorter and therefore takes proportionally less time to
+    /// put out. Growing every level in the same wall-clock time instead makes
+    /// the twigs crawl and the trunk snap out, which is backwards.
+    ///
+    /// Seven seconds for the trunk is deliberately slow. It is the whole of
+    /// "start with a single line" — for the first seven seconds there is one
+    /// filament on screen and nothing else.
+    static let genSeconds: Float = 5.5
+    static let genShrink: Float = 0.87
 
-    /// Eased over the last half-octave so it settles instead of hitting the cap.
-    static let growEaseOctaves: Float = 0.5
+    /// …with a floor, or the geometric series would have level twelve arriving
+    /// in a quarter of a second and every level after a tap would be a blink.
+    /// 1.5s is about as fast as a fork can appear and still be seen forking.
+    static let genFloor: Float = 1.5
+
+    /// Levels the tree reaches at rest, and this is a legibility number rather
+    /// than a coverage one. Coverage is reached around level seven; every level
+    /// after that doubles the branch count inside the same disc. At twelve the
+    /// colony came out as a full screen of dense mat with no branching legible
+    /// in it at all — which is exactly the complaint the whole form has been
+    /// answering. Ten spans the frame (radius ~0.83 field units against corners
+    /// at 0.55) and stops while the structure can still be read. Sum of the
+    /// durations above: roughly 32 seconds from nothing to a full frame.
+    static let levels: Float = 10
+
+    /// How many extra levels one octave of pull-back buys. Zooming out by 2x
+    /// halves everything on screen, and each level is TREE_SHRINK shorter than
+    /// the last, so an octave is worth ln2 / -ln(0.87) = 4.98 levels of it.
+    /// This is what makes a tap mean something: the colony gets smaller AND
+    /// gets somewhere new to grow.
+    static let levelsPerOctave: Float = 4.98
 
     /// How far back one tap shoves the camera, in octaves. 0.62 is a shrink to
-    /// 65% — big enough that the margin is unmistakably back in frame, small
-    /// enough that the mat doesn't vanish to a speck.
+    /// 65% — big enough that there is unmistakably room in frame again, small
+    /// enough that the colony doesn't vanish to a speck. Worth ~2.2 levels.
     static let tapPullback: Float = 0.62
     /// And how fast that shove eases in. Fast enough to read as caused by the
     /// finger, slow enough that it's a lurch backwards rather than a cut.
@@ -118,11 +130,12 @@ final class FieldState {
     private(set) var holdTarget: Float = 0
     private(set) var holdPhase: Float = 0
 
-    /// The mycelial colony. `reach` is its radius on screen; `zoomPush` is how
-    /// far the camera has been shoved back, in octaves, and only ever grows.
-    /// `pushDelta` is what it moved this frame — the shader needs it to keep
-    /// the feedback trail locked to the camera during a pullback.
-    private(set) var colonyReach: Float = Colony.start
+    /// The mycelial colony. `growth` is how many levels of the tree exist, as a
+    /// real number; `zoomPush` is how far the camera has been shoved back, in
+    /// octaves, and only ever grows. `pushDelta` is what it moved this frame —
+    /// the shader needs it to keep the feedback trail locked to the camera
+    /// during a pullback.
+    private(set) var colonyGrowth: Float = 0
     private(set) var zoomPush: Float = 0
     private(set) var pushDelta: Float = 0
     private var zoomPushTarget: Float = 0
@@ -142,27 +155,22 @@ final class FieldState {
         }
         pushDelta = zoomPush - prevPush
 
-        // Whatever the camera just did to the frame, the colony's footprint on
-        // it did too. Driving both off the same eased delta rather than
-        // setting the reach outright at the moment of the tap is what keeps
-        // them from drifting apart: the mat shrinks at exactly the rate the
-        // view pulls back, so the margin never slides against the texture.
+        // Then it grows, one level at a time, into however much room there is.
         //
-        // The floor is a floor on *shrinking*, never a minimum size. Applied
-        // as a plain `max` it also silently promoted a brand-new seedling to
-        // floor height on its first frame, so `Colony.start` did nothing at all
-        // and the one-filament stage never existed. Clamping to whichever is
-        // smaller of the floor and where the colony already was keeps taps from
-        // shrinking it to nothing without ever growing it.
-        colonyReach = max(colonyReach * exp2(-pushDelta),
-                          min(Colony.floorReach, colonyReach))
-
-        // Then it grows back into the room it was just given.
-        let head = log2(Colony.full / max(colonyReach, 0.001))
-        if head > 0 {
-            let ease = min(1, head / Colony.growEaseOctaves)
-            let step = min(Colony.growOctavesPerSecond * deltaTime * ease, head)
-            colonyReach *= exp2(step)
+        // The clock is per level and gets faster as it goes, because a deeper
+        // branch is shorter and the thing that's actually constant is the speed
+        // of a growing tip. Integrated rather than solved in closed form purely
+        // so the floor can be in it — a geometric series has level fifteen
+        // arriving in a fifth of a second, and a fork that appears in a fifth
+        // of a second is a fork nobody saw happen.
+        //
+        // The cap is what a tap moves. Pulling the camera back makes everything
+        // smaller on screen, which is exactly what buys room for finer levels.
+        let cap = Colony.levels + zoomPush * Colony.levelsPerOctave
+        if colonyGrowth < cap {
+            let duration = max(Colony.genSeconds * pow(Colony.genShrink, colonyGrowth),
+                               Colony.genFloor)
+            colonyGrowth = min(colonyGrowth + deltaTime / duration, cap)
         }
 
         // Ease grounding toward its target over roughly a second.
