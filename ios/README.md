@@ -231,14 +231,17 @@ Most of the feel lives in a handful of constants:
 | mycelial retreat speed | `MYCELIAL_GROW_RATE` — the same mechanism run backwards, currently 0.045. **This is not the perceived rate**, see below. It is also the clock every `AGE_*` constant is measured against |
 | the colony's size, growth and tap response | `Colony` in **`FieldState.swift`**, not the shader — `start`, `full`, `regrowTau`, `tapPullback`, `pushRate`, `floorReach`. A tap changes these and a tap is an event; the shader has nowhere to keep one |
 | how ragged the growing margin is | `COLONY_BRANCH_ANG` (**must be a whole number**) and `COLONY_BRANCH_RAD` shape the fingers; `COLONY_BASE` / `COLONY_FINGER` set how far a ridge throws one. See below for why it's log-polar |
-| how growth stages behind the margin | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE` — in octaves of retreat, so ~22s each at the current rate. This staging is the whole growth model, see below |
+| how growth stages behind the margin | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE`, `AGE_SETTLE` — in octaves of retreat, so ~22s each at the current rate. This staging is the whole growth model, see below |
+| how legible the deep interior is | `MAT_SETTLED_DIM`, `MAT_FINE_SETTLED`, `MAT_CELL`, `MAT_GAMMA`. **Read the note below before touching these** — they're the answer to "there's too much going on to see the branching", not decoration |
 | tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
 | tunnel bead count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW`, which is *derived*: `(TAU / COLUMNS) * 0.866` for a staggered circle packing. Move one and the other has to follow |
 | tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways. Capped by the packing, see below |
 | tunnel flow | `TUNNEL_LOBES` (**must be a whole number**), `TUNNEL_LOBE_R`, `TUNNEL_LOBE_A`. Amplitude is capped by shape, not taste — see below |
 | how fast the beads change colour | `TUNNEL_HUE_SLOW` and `TUNNEL_HUE_SPAN`, in rad/sec. Each bead draws its own rate from that range; **never give them a shared one** |
 | how reflective the beads look | `env` — a banded environment looked up by the surface normal. Weight it into `detail`; it's a broad term and broad terms fog through the feedback |
-| tunnel bead size | `TUNNEL_BEAD`, in column widths. **0.433 is a hard ceiling** and the twist is what sets it, see below |
+| tunnel bead size | `TUNNEL_BEAD`, in column widths. Useful up to ~0.577; past 0.5 beads meet along flat contacts, which is what packed marbles do |
+| how deep the corridor looks | `TUNNEL_COLUMNS`. Fewer beads around means each is bigger *and* each row is taller in log-radius, so fewer rings fit before the vanishing point. 22 was a shaft; 17 is a bowl |
+| how 3D the beads read | `TUNNEL_AMBIENT` and the contact-shading `mix(1.0, 0.62, ...)`, both via the `shade` channel. See below — this cannot go through `t` |
 | tunnel mortar glow | `TUNNEL_GAP_WAVE` / `TUNNEL_GAP_DRIFT` (the travelling pulse) and `TUNNEL_GAP_FLOOR` / `TUNNEL_GAP_SWING` (how dark it gets and how far it swings) |
 | weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
 | edge crispness | `persistBase` — tunnel and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
@@ -464,6 +467,7 @@ Everything else is that age driving what has had time to appear:
 | `AGE_MID` ~7s | the mid net starts filling in |
 | `AGE_THICK` ~13s | cords reach full width, from 28% at the tip |
 | `AGE_FINE` ~18s | the fine hyphae fill the cells, last |
+| `AGE_SETTLE` ~38s | and then the mat quiets down again |
 
 The staging is the point, and the cord *width* ramp is the load-bearing half of
 it. A hypha at the tip is a thread and the same hypha a minute later is a rope;
@@ -472,6 +476,27 @@ rather than something extending. Turn all three nets on at once and the colony
 simply materialises at full complexity wherever the margin happens to be — which
 is the "already there, just uncovered" read, arrived at from a different
 direction.
+
+#### Making the interior legible
+
+Rendered at one intensity everywhere, the deep interior of the mat is so dense
+that the branching cannot be read through it. The margin was the only part
+anyone could follow — and the margin is a thin ring around a screenful of noise.
+Three changes, all of them legibility decisions before they're aesthetic ones:
+
+- **Old mat quiets down.** Past `AGE_SETTLE` it loses most of its fine hyphae
+  and drops to `MAT_SETTLED_DIM` brightness, so the light is where the growth
+  is. This also happens to be true of the real thing: the active edge is the
+  bright part.
+- **Fewer, larger cells** (`MAT_CELL`). The old frequencies put around fifteen
+  coarse cells across a screen — a convincing mat, and too many to follow. Ten
+  still reads as grown rather than drawn (four would be a diagram) and leaves
+  each cord long enough to trace from one junction to the next.
+- **Crushed mid-tones** (`MAT_GAMMA`), so cords separate from the fuzz instead
+  of sitting in the same tonal band as it.
+
+The test for all three: can you pick one cord at the margin and follow it inward
+through two junctions? If not, they've drifted back.
 
 #### The margin, and why fingers need two dimensions
 
@@ -576,13 +601,16 @@ and the shear tilts the row axis on top — so a circle measured there squashes 
 leans with the twist. Undone (`e = (f.x - shear*f.y, f.y*aspect)`), the map to
 the screen is conformal, and a circle stays a circle at any shear and any radius.
 
-**`TUNNEL_BEAD` is capped at 0.433 by the twist, not by the packing.** Unsheared,
-the six nearest neighbours all sit one column width away, so 0.5 would have them
-kissing. Shear slides rows past each other, and once it passes half a column the
-staggered neighbour is directly overhead — `sqrt(3)/2 = 0.866` away instead of
-1.0. Anything above half of that fuses rows into columns every time the twist
-sweeps through. The side effect is worth keeping: between there and no shear the
-mortar opens and closes on the twist's cycle, so the packing breathes.
+**`TUNNEL_BEAD` is not capped at half the neighbour distance**, and an earlier
+version of this section said it was. That was true of the code that tested only
+the pixel's own rectangular cell, where going over the cap fused rows of beads
+into columns. It stopped being true the moment the nine-way nearest-centre
+search went in, and the reason is worth keeping: **with nearest-site assignment,
+two overlapping discs meet along the perpendicular bisector between their
+centres rather than blending into a blob.** Overlap is a *flat contact* — which
+is what a jar of marbles under its own weight actually looks like. The useful
+range runs to about 0.577, the circumradius of the packing, where the last
+triple-point gaps close and there's no mortar left at all.
 
 One split worth preserving: **hue dominates `t`, body shading goes in `detail`.**
 `t` is the palette coordinate, so anything that moves it moves colour. An early
@@ -592,6 +620,25 @@ highlights are the deliberate exception — they're tight enough to read as glin
 rather than as a gradient, and the fact that they move `t` by *different* amounts
 is exactly what makes them different colours, which is the one thing that says
 glass rather than painted plastic.
+
+#### `shade`, and why lighting can't go through `t`
+
+Forms return a palette coordinate. That is enough for almost everything, and it
+is *not* enough for a lit surface, which is worth understanding before adding
+another form that has one.
+
+`t` can only move a colour **along** the palette. Darkening a bead by scaling
+its `t` walks it toward zero — which these palettes do render as black, so the
+endpoint is right — but the trip there crosses most of the colour wheel, and
+every bead comes out a rainbow. That is the same failure the dome shading caused
+in the first version of this form, arrived at from a third direction.
+
+So `fieldFragment` takes a third output: `shade`, a straight brightness multiply
+applied after the palette and before the contrast curve. Forms that light
+nothing return 1. The tunnel uses it for real diffuse falloff with a real
+terminator, plus contact shading toward each bead's silhouette — a sphere is
+legible as a sphere because of where it goes **dark**, and nothing that only
+brightens can say that.
 
 #### Making it flow instead of spin
 
