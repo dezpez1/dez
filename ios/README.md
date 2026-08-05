@@ -230,7 +230,10 @@ Most of the feel lives in a handful of constants:
 | how much of the kaleidoscope is flat wash | `trapSum` in `kaliLayer` and its two weights. The min-traps go quiet where the orbit settles early; this one keeps accumulating and is what puts structure in those regions. **Weight it into `detail`, not `t`** — see below |
 | mycelial retreat speed | `MYCELIAL_GROW_RATE` — the same mechanism run backwards, currently 0.045. **This is not the perceived rate**, see below. It is also the clock every `AGE_*` constant is measured against |
 | the colony's size, growth and tap response | `Colony` in **`FieldState.swift`**, not the shader — `start`, `full`, `regrowTau`, `tapPullback`, `pushRate`, `floorReach`. A tap changes these and a tap is an event; the shader has nowhere to keep one |
-| how ragged the growing margin is | `COLONY_BRANCH_ANG` (**must be a whole number**) and `COLONY_BRANCH_RAD` shape the fingers; `COLONY_BASE` / `COLONY_FINGER` set how far a ridge throws one. See below for why it's log-polar |
+| how ragged the growing margin is | `COLONY_BRANCH_ANG` (**must be a whole number**) and `COLONY_BRANCH_RAD` shape the fingers. See below for why it's log-polar |
+| how *branched* it looks | `COLONY_RESIST` — how much harder the worst direction is than the best. 0 is a circle; above ~8 it's a starfish. `COLONY_RESIST_YOUNG` is the same knob for a seedling, where a starfish is right |
+| the connectivity march | `COLONY_STEP` / `COLONY_MARCH_MAX`, and `COLONY_SEED` / `COLONY_SPAN`. **Read the note below before touching any of them** — the guarantee that nothing appears in mid air lives in the shape of this loop |
+| brightness of the growing edge | `MARGIN_LINE` |
 | how growth stages behind the margin | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE`, `AGE_SETTLE` — in octaves of retreat, so ~22s each at the current rate. This staging is the whole growth model, see below |
 | how legible the deep interior is | `MAT_SETTLED_DIM`, `MAT_FINE_SETTLED`, `MAT_CELL`, `MAT_GAMMA`. **Read the note below before touching these** — they're the answer to "there's too much going on to see the branching", not decoration |
 | tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
@@ -497,6 +500,67 @@ Three changes, all of them legibility decisions before they're aesthetic ones:
 
 The test for all three: can you pick one cord at the margin and follow it inward
 through two junctions? If not, they've drifted back.
+
+#### Nothing appears that isn't connected to something
+
+The version before this thresholded a radius: a noise field said how far the
+colony had got at each angle, and anything inside that was grown. It looked like
+branching and it wasn't, because **the test at a point never asked about the
+points between it and the middle.** Wherever the noise peaked, mat appeared with
+nothing joining it to the rest — branches materialising in mid air.
+
+The fix is to stop asking *is this point inside the margin* and start asking
+*how hard was it to get here*:
+
+```
+cost(r) = integral from the seed out to r of (1 + RESIST * resistance)
+```
+
+The integrand is strictly positive, so cost only ever increases going outward,
+and that single property is the whole guarantee: the grown region is an interval
+along every ray, so it's star-shaped, so every grown point has an unbroken trail
+of grown material back to the middle. Connectivity is never checked or enforced
+anywhere — it cannot fail. Branching survives and now happens for the right
+reason: growth runs far up the cheap channels and stalls in the expensive ones,
+and the channels fork.
+
+**Fixed step size, not a fixed sample count**, and this is the part that bites.
+Spreading N samples across the whole span — the obvious midpoint rule — moves
+every sample point as the radius grows, so the quadrature error wanders with it.
+Six samples of a noisy integrand wander enough that cost sometimes *decreases*
+outward, and every place it does is an island with a gap behind it: the exact
+bug this march exists to prevent, reintroduced by the arithmetic. Fixed
+positions mean going outward only ever adds terms, so the sum is monotone by
+construction rather than by luck.
+
+`COLONY_MARCH_MAX * COLONY_STEP` must cover the widest span that can be on
+screen. Past it the field returns unreached rather than trusting a truncated
+integral — an undercounted cost reads as *grown*, which is the worst way for
+this to fail.
+
+**Two unit traps, both found by looking.** `budget` and `cost` are in cost
+units, which inflate with `RESIST` — left unnormalised, a fourteen-second-old
+seedling's centre came out twenty-six octaves old and rendered as fully settled
+mat. And nothing capped age to how long the colony had actually existed, so a
+fresh session arrived pre-aged; `min(age, time * MYCELIAL_GROW_RATE)` fixes that.
+
+**Proving it, rather than arguing it.** The claim was checked by temporarily
+rendering the mask alone — `age > 0` as flat white — which showed a single
+connected star with no islands. Worth doing again after any change here, because
+the failure is invisible in a normal render: what you see instead is scraps.
+
+#### The advancing front is drawn, not implied
+
+Even with a provably connected mask, the *render* can look disconnected. Every
+other term is the mat multiplied by an age factor, so a finger whose tip lands
+on a cell interior renders near black and the fingertip beyond it reads as a
+detached scrap — the mid-air-branch complaint arriving through the renderer
+instead of the model.
+
+`frontLine` (`emerge * tip`, scaled by `MARGIN_LINE`) draws the margin as a
+thing in its own right, independent of what the mat happens to contain there.
+It's also truer: a real colony's leading edge is a continuous advancing hyphal
+front, brighter than anything behind it.
 
 #### The margin, and why fingers need two dimensions
 

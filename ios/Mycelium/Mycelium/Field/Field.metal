@@ -91,8 +91,48 @@ constant float MYCELIAL_GROW_RATE = 0.045;
 /// isolated spikes, which is exactly what it produced.
 constant float COLONY_BRANCH_ANG = 7.0;
 constant float COLONY_BRANCH_RAD = 0.52;
-constant float COLONY_BASE   = 0.46;   // reach with no ridge under it
-constant float COLONY_FINGER = 1.05;   // how far a ridge throws a finger out
+
+/// How much harder the worst direction is than the best. This is the single
+/// knob for how *branched* the colony looks: at 0 the resistance field does
+/// nothing and the margin is a circle, and every increase pushes the cheap
+/// channels further ahead of the expensive ones. Above ~8 the fastest channel
+/// runs away so far that everything else is a stub, and the colony reads as a
+/// starfish rather than a network.
+///
+/// Except at the very beginning, where a starfish is exactly right — a young
+/// colony is one filament finding its way out, not a small finished mat. YOUNG
+/// is that, and it ramps down to the settled value as the colony fills in.
+constant float COLONY_RESIST       = 5.0;
+constant float COLONY_RESIST_YOUNG = 17.0;
+
+/// The outward march: a **fixed step size** with a bounded loop, never a fixed
+/// number of samples spread across the span. See the note at the march itself —
+/// that distinction is the difference between the connectivity guarantee
+/// holding and quietly not holding.
+///
+/// STEP is in natural-log units of radius, so 0.30 is about 35% of a radius per
+/// sample. MAX has to cover the widest span that can be on screen (~4 for a
+/// settled colony at the corners) or the integral truncates, and a truncated
+/// cost reads as grown.
+///
+/// This is the whole added cost of the guarantee. It's paid on the ring of
+/// pixels inside the colony at large radius — pixels near the middle break out
+/// after a step or two, and everything outside never enters the loop.
+constant float COLONY_STEP      = 0.30;
+constant int   COLONY_MARCH_MAX = 15;
+
+/// The original speck, and how many natural-log units of radius the colony
+/// spans once it's going.
+///
+/// SEED is what makes the first seconds a single filament rather than a scale
+/// model of a finished mat. SPAN is what makes everything after that
+/// scale-invariant: once the colony is bigger than SEED * e^SPAN, growth is
+/// counted from a radius that tracks the colony instead of from a fixed point,
+/// so pulling the camera back shrinks the whole thing without ageing or
+/// rejuvenating a single pixel of it. 3.2 is about 4.6 octaves, which puts the
+/// changeover at a reach of ~0.29.
+constant float COLONY_SEED = 0.012;
+constant float COLONY_SPAN = 3.2;
 
 /// Ages, in octaves of camera retreat — 1 octave = 1/MYCELIAL_GROW_RATE
 /// seconds, about 22s at 0.045.
@@ -134,6 +174,11 @@ constant float MAT_FINE_SETTLED = 0.15;   // and once the mat has quieted
 /// be a diagram) but leaves each cord long enough to trace from one junction to
 /// the next. The gamma crushes the mid-tones so cords separate from the fuzz
 /// instead of sitting in the same tonal band as it.
+/// Brightness of the advancing front, drawn as a line in its own right rather
+/// than as the mat lit up. Without it a finger whose tip lands on an empty
+/// patch of mat reads as a detached scrap — see the note at `frontLine`.
+constant float MARGIN_LINE = 0.80;
+
 constant float MAT_CELL  = 0.72;
 constant float MAT_GAMMA = 1.55;
 
@@ -819,8 +864,15 @@ static inline float mycelialLayer(float2 p, float drift, float churn,
     // goes outward, so the cords should too — displacing radially by an amount
     // that varies around the ring stretches the cells into the direction of
     // travel and the coarse net stops being isotropic foam.
+    //
+    // Faded out near the origin, and that is not optional. `dir` sweeps through
+    // every angle inside an arbitrarily small disc around the middle, so an
+    // undamped radial displacement is a singularity there — it wound the fine
+    // threads into nested concentric ovals, a smooth "eye" sitting in the
+    // middle of the mat. Hidden for as long as the interior was dense enough to
+    // cover it, and unmistakable the moment the settled mat thinned out.
     float2 dir = normalize(p + float2(1e-6, 1e-6));
-    q += dir * (wr.y - 0.5) * 0.38;
+    q += dir * (wr.y - 0.5) * 0.38 * smoothstep(0.0, 0.14, length(p));
 
     // Two cellular layers only. The third used to be a finer cell net, which
     // was the wrong primitive for what fills the cells — see below.
@@ -959,29 +1011,113 @@ static inline float mycelialField(float2 p, float drift, float time,
     float r = max(length(p), 1e-5);
     float ang = atan2(p.y, p.x) + drift * 0.004;   // the whole margin turns
 
-    // Log-polar. The radius axis is `log r`, so a feature keeps its shape at
-    // every scale and the fingers are as detailed near the middle as at the
-    // rim; the angular axis is wrapped by `ridgedP` at COLONY_BRANCH_ANG, which
-    // is why that constant has to be a whole number. The slow sine on the
-    // radial axis is the fingers breathing in and out — without it the margin's
-    // silhouette is almost static once the colony has settled, and the mat just
-    // flows through a fixed outline.
-    float2 lp = float2(log(r) * COLONY_BRANCH_RAD + 0.22 * sin(drift * 0.023),
-                       ang / TAU * COLONY_BRANCH_ANG);
-    float ridge = ridgedP(lp, COLONY_BRANCH_ANG);
+    // ── Nothing appears that isn't connected to something ──────────────────
+    // The version before this thresholded a radius: a noise field said how far
+    // the colony had got at each angle, and anything inside that was grown. It
+    // looked like branching and it wasn't, because *the test at a point never
+    // asked about the points between it and the middle*. Wherever the noise
+    // happened to peak, mat appeared, with nothing joining it to the rest —
+    // branches materialising in mid air, which is the one thing growth does not
+    // do.
+    //
+    // The fix is to stop asking "is this point inside the margin" and start
+    // asking "how hard was it to GET here". Growth travels outward through a
+    // resistance field, and a point's age is the budget minus what the journey
+    // cost:
+    //
+    //     cost(r) = integral from the seed out to r of (1 + RESIST * resist)
+    //
+    // The integrand is strictly positive, so cost only ever increases going
+    // outward — and that single property is the whole guarantee. It means the
+    // grown region is bounded by exactly one radius per direction with no gaps
+    // behind it, so every grown point has an unbroken trail of grown material
+    // back to the middle. Connectivity isn't checked or enforced anywhere; it
+    // cannot fail.
+    //
+    // Branching survives, and now happens for the right reason: growth runs far
+    // up the cheap channels and stalls in the expensive ones, and the channels
+    // themselves fork.
+    float lrReach = log(max(reach, COLONY_SEED * 1.05));
 
-    // A little isotropic noise on top, so the fingers aren't all the same
-    // length and the ones that fall short leave bays behind them.
-    float lump = fbm3(p * 5.0 + float2(-drift * 0.008, drift * 0.011));
+    // A young colony is nearly all contrast — one filament gets out and nothing
+    // else does. It relaxes toward the settled value as the mat fills in.
+    float young  = 1.0 - smoothstep(COLONY_SEED * 2.0, COLONY_SEED * 22.0, reach);
+    float resist = mix(COLONY_RESIST, COLONY_RESIST_YOUNG, young);
 
-    float frontEff = reach * (COLONY_BASE
-                              + COLONY_FINGER * ridge * (0.55 + 0.80 * lump));
+    // Where growth is counted from. Floored at a fixed speck early on; tracking
+    // the colony afterwards, which is what makes the whole thing
+    // scale-invariant under the tap pullback.
+    float lr0 = max(log(COLONY_SEED), lrReach - COLONY_SPAN);
+    float lr  = log(r);
 
-    // Age in octaves of retreat. Negative means the margin hasn't been here
-    // yet, and that is the only place this returns nothing — the softness at
-    // the very tip is `emerge` below, not a wide fade band. A wide one was what
-    // made the old version read as a cotton ball with a halo.
-    float age = log2(frontEff / r);
+    // Budget: what the journey costs at average resistance. Defined this way so
+    // a typical direction lands exactly at `reach` and the reach constants stay
+    // meaningful when RESIST moves.
+    float budget = (lrReach - lr0) * (1.0 + resist * 0.5);
+
+    // Even at zero resistance nothing gets past this, and outside it is most of
+    // the screen for most of a session — so the march below, and the two full
+    // evaluations of the mat after it, are skipped out there.
+    if (lr - lr0 > budget) {
+        detail = 0.0;
+        return 0.0;
+    }
+
+    float span = max(lr - lr0, 0.0);
+
+    // Past what the march can cover, treat as unreached rather than trusting a
+    // truncated integral — an undercounted cost reads as *grown*, which is the
+    // worst way for this to fail.
+    if (span > float(COLONY_MARCH_MAX) * COLONY_STEP) {
+        detail = 0.0;
+        return 0.0;
+    }
+
+    // ── Fixed step, not fixed count ────────────────────────────────────────
+    // This is the part that has to be right, and the obvious version isn't.
+    // Spreading a fixed number of samples across the whole span — a midpoint
+    // rule with N points — moves every sample point as the radius grows, so the
+    // quadrature error wanders with it. Six samples of a noisy integrand wander
+    // enough that cost sometimes *decreases* outward, and every place it does
+    // is an island of mat with a gap behind it. Exactly the mid-air branches
+    // this whole march exists to prevent, reintroduced by the arithmetic.
+    //
+    // Fixed step positions fix it structurally. The samples sit at the same
+    // places in log-radius for every pixel along a ray, so going outward only
+    // ever *adds* terms and fattens the partial one at the end. Each term is
+    // positive, so the total is monotone by construction rather than by luck.
+    float acc = 0.0;
+    for (int i = 0; i < COLONY_MARCH_MAX; i++) {
+        float w = clamp((span - float(i) * COLONY_STEP) / COLONY_STEP, 0.0, 1.0);
+        if (w <= 0.0) break;
+        float x = lr0 + (float(i) + 0.5) * COLONY_STEP;
+        // Log-polar, periodic in the angular axis — which is why
+        // COLONY_BRANCH_ANG has to be a whole number. The slow sine drifts the
+        // channels, so the fingers aren't a fixed silhouette the mat merely
+        // flows through.
+        float2 lp = float2(x * COLONY_BRANCH_RAD + 0.22 * sin(drift * 0.023),
+                           ang / TAU * COLONY_BRANCH_ANG);
+        acc += w * COLONY_STEP * (1.0 + resist * (1.0 - ridgedP(lp, COLONY_BRANCH_ANG)));
+    }
+    float cost = acc;
+
+    // Age in octaves of retreat — the unit every AGE_* constant is written in.
+    //
+    // Divided back through the cost-per-radius factor, and that division is not
+    // cosmetic. `budget` and `cost` are in cost units, which inflate with
+    // `resist`; left in those units the young colony's centre came out around
+    // twenty-six octaves old, so a fourteen-second-old seedling rendered as
+    // fully settled mat — dimmed, fine hyphae gone, a dark blob with a lit rim.
+    // Normalised, an average-resistance direction gives exactly log2(reach / r),
+    // which is what the constants were tuned against.
+    float age = (budget - cost) / (1.0 + resist * 0.5) * 1.4426950409;
+
+    // And nothing is older than the colony. The line above says how long ago
+    // the margin passed *given where it is now*, which is the right shape and
+    // says nothing about whether the colony has existed that long — on a fresh
+    // session it hasn't, and the whole mat would arrive pre-aged.
+    age = min(age, time * MYCELIAL_GROW_RATE);
+
     if (age <= 0.0) {
         detail = 0.0;
         return 0.0;
@@ -1041,14 +1177,32 @@ static inline float mycelialField(float2 p, float drift, float time,
     // burst of dissolve is itself an event you can see and time.
     float web = mix(webNear, webFar, k) * emerge;
 
+    // ── The advancing front ────────────────────────────────────────────────
+    // A line along the margin itself, and it does not depend on `web`.
+    //
+    // Everything else here is the mat multiplied by an age term, so wherever
+    // the mat happens to be a cell interior it renders near black — including
+    // at the margin. The reached region is provably connected (it's an interval
+    // along every ray, by construction), but *that isn't what you see*: a
+    // finger whose tip lands on empty mat shows up as a detached scrap with a
+    // gap behind it. Which is exactly the mid-air-branch complaint, arriving
+    // through the renderer instead of the model.
+    //
+    // Drawing the front as its own thing fixes it and is truer besides — a real
+    // colony's leading edge is a continuous advancing hyphal front, brighter
+    // than anything behind it. `emerge` rising against `tip` falling puts the
+    // band just inside the boundary rather than on it.
+    float frontLine = emerge * tip;
+
     // The tip glows. A growing hypha carries its cytoplasm at the end, and the
     // bright point travelling ahead of a dim trail is most of what makes a
     // timelapse read as advancing rather than as appearing.
-    detail = clamp(mix(dNear, dFar, k) * emerge + web * tip * 1.2, 0.0, 1.0);
+    detail = clamp(mix(dNear, dFar, k) * emerge + web * tip * 1.2
+                   + frontLine * 0.9, 0.0, 1.0);
 
     // No offset: empty space lands at exactly t = 0, which the mycelial
     // palettes render as black.
-    return web * (1.15 + tip * 0.55) * quiet;
+    return (web * (1.15 + tip * 0.55) + frontLine * MARGIN_LINE) * quiet;
 }
 
 // MARK: - Field pass

@@ -47,15 +47,32 @@ enum Breath {
 enum Colony {
     /// Screen radius in field units, where the visible area is ~0.46 wide and
     /// 1.0 tall — the corners sit at ~0.55.
-    static let start: Float = 0.30
+    ///
+    /// `start` is deliberately tiny. Below COLONY_SEED * e^COLONY_SPAN (~0.29)
+    /// the shader counts growth from a fixed speck rather than from a radius
+    /// that scales with the colony, and it runs the resistance contrast far
+    /// higher — so the first thing on screen is one filament finding its way
+    /// out, not a small copy of a finished mat.
+    static let start: Float = 0.045
     /// Past the corners on purpose: at rest the mat owns the whole frame.
     static let full: Float = 0.86
     /// However many times it gets tapped, the colony never shrinks to nothing.
     static let floorReach: Float = 0.17
 
-    /// Exponential approach, so growth always eases into place instead of
-    /// arriving on an edge. Roughly 95% of the way back in 3x this.
-    static let regrowTau: Float = 13.0
+    /// Octaves of radius per second. **Multiplicative, not an approach toward a
+    /// target**, and the difference is the entire seedling phase.
+    ///
+    /// An exponential approach covers most of the absolute distance first,
+    /// because that's where the gap is biggest — from a speck to a third of the
+    /// screen took under two seconds, so the one-filament stage was over before
+    /// anyone saw it. A colony doubles; it doesn't add inches. At a constant
+    /// 0.10 octaves/sec the whole run from seed to full frame takes ~42s, the
+    /// seedling stage lasts ~25s of it, and one tap's worth of pullback grows
+    /// back in ~6s.
+    static let growOctavesPerSecond: Float = 0.10
+
+    /// Eased over the last half-octave so it settles instead of hitting the cap.
+    static let growEaseOctaves: Float = 0.5
 
     /// How far back one tap shoves the camera, in octaves. 0.62 is a shrink to
     /// 65% — big enough that the margin is unmistakably back in frame, small
@@ -130,11 +147,23 @@ final class FieldState {
         // setting the reach outright at the moment of the tap is what keeps
         // them from drifting apart: the mat shrinks at exactly the rate the
         // view pulls back, so the margin never slides against the texture.
-        colonyReach = max(colonyReach * exp2(-pushDelta), Colony.floorReach)
+        //
+        // The floor is a floor on *shrinking*, never a minimum size. Applied
+        // as a plain `max` it also silently promoted a brand-new seedling to
+        // floor height on its first frame, so `Colony.start` did nothing at all
+        // and the one-filament stage never existed. Clamping to whichever is
+        // smaller of the floor and where the colony already was keeps taps from
+        // shrinking it to nothing without ever growing it.
+        colonyReach = max(colonyReach * exp2(-pushDelta),
+                          min(Colony.floorReach, colonyReach))
 
         // Then it grows back into the room it was just given.
-        colonyReach += (Colony.full - colonyReach)
-                     * (1 - exp(-deltaTime / Colony.regrowTau))
+        let head = log2(Colony.full / max(colonyReach, 0.001))
+        if head > 0 {
+            let ease = min(1, head / Colony.growEaseOctaves)
+            let step = min(Colony.growOctavesPerSecond * deltaTime * ease, head)
+            colonyReach *= exp2(step)
+        }
 
         // Ease grounding toward its target over roughly a second.
         let easeRate: Float = 1.6
