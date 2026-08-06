@@ -1791,7 +1791,7 @@ constant float BLUR_WEIGHT[3] = { 0.2270270270, 0.3162162162, 0.0702702703 };
 /// pixel in every form was unchanged. A correct pass wired to a threshold above
 /// the content is indistinguishable from no pass at all.
 ///
-0.38 puts it under the bright half of the structure, so the beads glow, the
+/// 0.38 puts it under the bright half of the structure, so the beads glow, the
 /// mycelial cords glow, and the light bleeds into the black between them, which
 /// is the thing that reads as emission. The squared knee is what stops that
 /// becoming fog: contribution is (1 - T/peak)^2, so 0.5 gives 5%, 0.8 gives
