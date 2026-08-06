@@ -341,11 +341,11 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
         // nothing and saves keeping the bright output alive. The gain rides on
         // the final pass so it applies once; the halo wants to be fainter than
         // the core or it stops reading as depth and starts reading as haze.
-        let wide: Float = 2.6
+        let wide: Float = 4.2
         postPass(cmd: cmd, pipeline: blurPipeline, from: bloom[2], to: bloom[1],
                  params: SIMD4(bx * wide, 0, 1, 0))
         postPass(cmd: cmd, pipeline: blurAddPipeline, from: bloom[1], to: bloom[2],
-                 params: SIMD4(0, by * wide, 0.75, 0), load: true)
+                 params: SIMD4(0, by * wide, 0.40, 0), load: true)
 
         // ── Pass 3: tonemap to the screen ───────────────────────────────────
         if let enc = cmd.makeRenderCommandEncoder(descriptor: rpd) {

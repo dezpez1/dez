@@ -1780,16 +1780,37 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 constant float BLUR_OFFSET[3] = { 0.0, 1.3846153846, 3.2307692308 };
 constant float BLUR_WEIGHT[3] = { 0.2270270270, 0.3162162162, 0.0702702703 };
 
-/// Where white starts, for the purposes of glowing. Not 1.0, deliberately:
-/// structure sitting just under white should carry a faint halo or the effect
-/// only ever shows up on the two forms that have a designated hot spot. The
-/// squared knee below is what keeps that from becoming fog — at 0.8 a pixel
-/// contributes 2% of itself, at 4.0 it contributes 76%.
-constant float BLOOM_THRESHOLD = 0.58;
+/// Where white starts, for the purposes of glowing — and it belongs well BELOW
+/// white, which took a round to accept.
+///
+/// 0.58 was the first guess and it was reasoning about the wrong distribution.
+/// It sat above almost everything the app actually draws: the forms live
+/// between 0.3 and 0.9, and the only things clearing 0.58 by enough to matter
+/// were the two spots deliberately made hot. So the entire visible result of
+/// adding a bloom pass was that the tunnel's core got brighter, and every other
+/// pixel in every form was unchanged. A correct pass wired to a threshold above
+/// the content is indistinguishable from no pass at all.
+///
+0.38 puts it under the bright half of the structure, so the beads glow, the
+/// mycelial cords glow, and the light bleeds into the black between them, which
+/// is the thing that reads as emission. The squared knee is what stops that
+/// becoming fog: contribution is (1 - T/peak)^2, so 0.5 gives 5%, 0.8 gives
+/// 27%, and 4.0 gives 91%. Bright things glow hard, mid things barely, dim
+/// things not at all — the curve does the discriminating, not the cutoff.
+///
+/// 0.32 was one step too far and worth recording, because the failure was the
+/// exact mirror of the first one. It filled the gaps between the tunnel's beads
+/// with a pale wash and dropped near-black from 40% to 25%. **This constant has
+/// a narrow window: too high and the pass does nothing, too low and it fogs.**
+/// The lever that actually separates those two outcomes is not this number at
+/// all — it is the width of the halo's tail, which is the wide pass's gain in
+/// FieldRenderer. Cutting that from 0.75 to 0.40 recovered every point of
+/// near-black while leaving the glow on the objects untouched.
+constant float BLOOM_THRESHOLD = 0.38;
 
 /// How much of the blurred result is added back. Above ~1.3 the glow starts
 /// reading as a dirty lens rather than as light.
-constant float BLOOM_STRENGTH = 0.60;
+constant float BLOOM_STRENGTH = 0.75;
 
 /// Black point, applied after the glow is added and before the tonemap.
 ///
@@ -1801,8 +1822,18 @@ constant float BLOOM_STRENGTH = 0.60;
 /// nowhere to come from. The references get their depth from the bottom of the
 /// range, not the top.
 ///
-/// Small — 4% — because it is a subtract, and everything below it is gone.
-constant float BLACK_POINT = 0.040;
+/// Went 4% to 7.8% as the bloom threshold came down, and the two move together
+/// by necessity: a lower threshold pushes more light into the blur, whose far
+/// tail lands everywhere, and this is the only thing standing between that tail
+/// and a grey film. **If you raise BLOOM_STRENGTH or lower BLOOM_THRESHOLD,
+/// check the darks.**
+///
+/// It is a hard subtract, so it costs a fixed amount everywhere and therefore
+/// costs the *darkest* form proportionally the most. Mycelial reads about 2
+/// points more near-black at 7.8% than at 5.5% while the tunnel barely notices.
+/// If that ever needs to stop being true, the fix is a toe — `c*c/(c+k)` —
+/// which leaves the highlights alone and crushes only near zero.
+constant float BLACK_POINT = 0.078;
 
 /// Bright pass. Downsamples 4x on the way in, which is where most of the
 /// saving is. The four taps sit one source texel out from the centre, and the
