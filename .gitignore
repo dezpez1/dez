@@ -6,6 +6,10 @@ __pycache__/
 # Xcode
 build/
 DerivedData/
+
+# Field Lab's binary. It is a full rebuild from source every run, so there is
+# nothing here worth keeping and it is 500KB of churn if committed.
+ios/tools/FieldLab/.build/
 *.xcuserstate
 xcuserdata/
 *.xcscmblueprint

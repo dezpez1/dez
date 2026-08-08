@@ -19,21 +19,9 @@ import Metal
 import MetalKit
 import simd
 
-/// **This struct is declared twice** — here and in `Field.metal`. There is no
-/// shared header and nothing checks that they agree, so adding a field to one
-/// side still compiles cleanly and silently reinterprets memory on the other.
-/// Every field is a `float4` for the same reason: no padding, so the two
-/// layouts can only disagree in ways that are obvious to read.
-private struct Uniforms {
-    var resTime: SIMD4<Float>
-    var groundCount: SIMD4<Float>
-    var holdParams: SIMD4<Float>
-    var colony: SIMD4<Float>
-    var palA: SIMD4<Float>
-    var palB: SIMD4<Float>
-    var palC: SIMD4<Float>
-    var palD: SIMD4<Float>
-}
+// `Uniforms` lives in Uniforms.swift — Field Lab compiles the same declaration,
+// so the app and the lab cannot drift apart. Keeping it in step with
+// `struct Uniforms` in Field.metal is still manual and still unchecked.
 
 final class FieldRenderer: NSObject, MTKViewDelegate {
 
@@ -292,7 +280,8 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                 // needs it or the ghost lags behind during a pullback.
                 colony: SIMD4(state.colonyGrowth, state.zoomPush,
                               state.pushDelta, 0),
-                palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, 0),
+                // w carries the palette's own hue spread — see `Palette.spread`.
+                palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, pal.spread),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),
                 palD: SIMD4<Float>(pal.d.x, pal.d.y, pal.d.z, 0))

@@ -14,12 +14,20 @@
 //    1 finger   drag         → nothing; moving is only what cancels the hold
 //    2 fingers  press + hold → Ground Me (engages after a short delay so a
 //                              stray two-finger touch can't flip it)
+//    2 fingers  pinch        → zoom, both ways. Mycelial only; the other forms
+//                              have no camera to move
 //    3 fingers  tap          → leave the session (deliberate, hard to hit
 //                              by accident, but not buried in a menu)
 //
 //  Tap and rest are the same gesture told apart by what happens after it
 //  lands, so there is nothing to learn — and since neither one cares where it
 //  lands, there is nothing to aim at either.
+//
+//  Ground Me and pinch are the same pair of fingers told apart the same way:
+//  two that stay put ground, two that move apart or together zoom. Grounding is
+//  the one that must never be missed, so it is the one that wins ties — the
+//  pinch has to travel PINCH_SLOP before it is recognised at all, and once
+//  grounding has engaged the pinch cannot take it away.
 //
 
 import SwiftUI
@@ -53,6 +61,38 @@ final class MetalFieldView: MTKView {
     /// that belongs nowhere near the photosensitivity band. At 0.22s the
     /// envelopes overlap heavily and sum to a smooth swell rather than flicker.
     private static let tapInterval: CFTimeInterval = 0.22
+
+    /// Pinch-to-zoom, sharing its two fingers with Ground Me.
+    ///
+    /// `pinchRef` is the span the pinch is measured against — set at the moment
+    /// the gesture is *recognised*, not at the moment the second finger landed,
+    /// so the zoom starts from zero instead of jumping by the slop it just spent
+    /// proving itself.
+    private var pinchSpan: CGFloat?      // span when the second finger landed
+    private var pinchRef: CGFloat?       // …and once recognised, from here
+    private var isZooming = false
+
+    /// How far the fingers must travel, as a fraction of their spacing, before
+    /// this counts as a pinch rather than a rest. Generous, because the fingers
+    /// it has to tell apart belong to someone who is not steady, and calling a
+    /// tremor a pinch would drift the zoom under a hand that meant to ground.
+    private static let pinchSlop: CGFloat = 0.14
+
+    /// The distance between the two active touches, or nil if there aren't two.
+    private func span(_ event: UIEvent?) -> CGFloat? {
+        let live = (event?.allTouches ?? []).filter {
+            $0.phase != .ended && $0.phase != .cancelled
+        }
+        guard live.count == 2 else { return nil }
+        let pts = live.map { $0.location(in: self) }
+        return max(hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y), 1)
+    }
+
+    private func endPinch() {
+        pinchSpan = nil
+        pinchRef = nil
+        isZooming = false
+    }
 
     override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
@@ -107,7 +147,8 @@ final class MetalFieldView: MTKView {
 
     private func updateGrounding(activeTouches: Int) {
         if activeTouches >= 2 {
-            guard groundingWorkItem == nil else { return }
+            // A recognised pinch is not a rest, so don't arm behind it.
+            guard !isZooming, groundingWorkItem == nil else { return }
             let work = DispatchWorkItem { [weak self] in
                 self?.state?.setGrounding(true)
                 Haptics.shared.startGroundingPulse()
@@ -133,10 +174,16 @@ final class MetalFieldView: MTKView {
             groundingWorkItem = nil
             state?.setGrounding(false)
             cancelHold()
+            endPinch()
             Haptics.shared.stopGroundingPulse()
             onExit?()
             return
         }
+
+        // Remember the spacing the moment the second finger lands, so a pinch
+        // has something to be measured against if it turns out to be one.
+        pinchSpan = active == 2 ? span(event) : nil
+        if active != 2 { endPinch() }
 
         updateGrounding(activeTouches: active)
 
@@ -156,6 +203,31 @@ final class MetalFieldView: MTKView {
         let active = event?.allTouches?.filter {
             $0.phase != .ended && $0.phase != .cancelled
         }.count ?? touches.count
+
+        // ── Two fingers: rest or pinch ─────────────────────────────────────
+        if active == 2, let now = span(event), let start = pinchSpan {
+            if isZooming, let ref = pinchRef {
+                state?.updateZoom(scale: now / ref)
+            } else if abs(now / start - 1) > Self.pinchSlop {
+                // Recognised. Grounding is the gesture that must never be
+                // missed, so once it has actually engaged it keeps the fingers
+                // — a pinch can only claim them from a rest that is still only
+                // pending.
+                if state?.grounding ?? 0 > 0.001 { return }
+                groundingWorkItem?.cancel()
+                groundingWorkItem = nil
+                state?.setGrounding(false)
+                Haptics.shared.stopGroundingPulse()
+
+                // Measured from here rather than from `start`, so the zoom
+                // begins at zero instead of jumping by the slop it just spent.
+                pinchRef = now
+                isZooming = true
+                state?.beginZoom()
+            }
+            return
+        }
+
         guard active == 1, let t = touches.first else { cancelHold(); return }
 
         let p = t.location(in: self)
@@ -179,11 +251,16 @@ final class MetalFieldView: MTKView {
         let remaining = event?.allTouches?.filter {
             $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
+        // A finger leaving ends the pinch outright rather than re-anchoring it
+        // on whatever pair is left. Lifting one of three fingers should not
+        // suddenly start zooming.
+        if remaining < 2 { endPinch() }
         updateGrounding(activeTouches: remaining)
         if remaining == 0 { cancelHold() }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        endPinch()
         updateGrounding(activeTouches: 0)
         cancelHold()
     }

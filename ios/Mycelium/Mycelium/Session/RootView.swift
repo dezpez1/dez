@@ -40,6 +40,39 @@ private struct FieldPreviewRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: MTKView, context: Context) {}
 }
 
+/// The colony, growing in behind the home screen.
+///
+/// Its own `FieldState`, so its clock is its own: the growth you see is how long
+/// **this visit to the home screen** has lasted, not how long the app has been
+/// open. Leaving for a session and coming back starts it over from bare edges,
+/// which is the behaviour Jacob asked for — "only when you're on that home
+/// screen."
+///
+/// Held at low opacity rather than dimmed in the shader. Sitting-behind-type is
+/// a property of this screen, not of the form, and the form still has to render
+/// at full strength in Field Lab where it gets judged.
+private struct HomeGrowth: View {
+    @State private var state: FieldState = {
+        let s = FieldState()
+        s.form = .mycelial
+        s.paletteIndex = 3          // Filament — the palest of the four
+        return s
+    }()
+
+    var body: some View {
+        FieldPreviewRepresentable(state: state)
+            .opacity(0.55)
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
+            // A fresh state on every appearance is what restarts the growth.
+            // Resetting the existing one would do it too and would keep the
+            // renderer's feedback history, which is a frame of the *old*
+            // colony — it would bleed through the first second of the new one.
+            .onAppear { state = { let s = FieldState(); s.form = .mycelial
+                                  s.paletteIndex = 3; return s }() }
+    }
+}
+
 // MARK: - One tile
 
 private struct PreviewTile: View {
@@ -223,6 +256,7 @@ struct RootView: View {
     private var entry: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            HomeGrowth()
 
             VStack(spacing: 0) {
                 VStack(spacing: 7) {
@@ -238,16 +272,18 @@ struct RootView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 16)
 
-                // Scrolls, because forms keep arriving. Two rows sit on screen
-                // and the third peeks, which is what tells you there's more
-                // without needing to say so.
-                ScrollView(.vertical, showsIndicators: false) {
+                // One row. It scrolled when there were four forms and two rows
+                // with a third peeking; there are two now and they fit, so the
+                // scroll view would only add a bounce with nowhere to go.
+                //
+                // `Form.pickable`, not `allCases` — mycelial is the background
+                // growing behind this grid, not one of the things in it.
                 LazyVGrid(
                     columns: [GridItem(.flexible(), spacing: 12),
                               GridItem(.flexible(), spacing: 12)],
                     spacing: 12
                 ) {
-                    ForEach(Form.allCases) { form in
+                    ForEach(Form.pickable) { form in
                         PreviewTile(
                             form: form,
                             paletteIndex: Binding(
@@ -264,12 +300,14 @@ struct RootView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
-                }
+
+                Spacer(minLength: 0)
 
                 VStack(spacing: 6) {
                     legend("tap", "pulse")
                     legend("press and rest", "glow and dim")
                     legend("two fingers, hold", "ground me")
+                    legend("two fingers, pinch", "zoom")
                     legend("three fingers", "leave")
                 }
                 .padding(.top, 12)

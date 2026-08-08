@@ -31,8 +31,7 @@ constant float TAU = 6.28318530718;
 
 constant int FORM_MYCELIAL = 0;
 constant int FORM_KALEIDOSCOPE = 1;
-constant int FORM_TUNNEL = 2;
-constant int FORM_WEAVE = 3;
+constant int FORM_LOBES = 3;
 
 // How much of a tap each form takes. Mycelial is loose and can absorb a lot;
 // the geometric forms already carry strong structure and a heavy flare washes
@@ -100,13 +99,20 @@ constant int   TREE_LEVELS = 17;
 
 /// The first branch, in field units, where the screen is 1.0 tall.
 ///
-/// Lengths shrink geometrically after it, so the colony's radius is the partial
-/// sum TRUNK * (1 - SHRINK^n)/(1 - SHRINK) — 0.83 at eleven levels, which is
-/// past the corners once the branches' zigzag is taken off. SHRINK is also what
-/// keeps the outer levels legible: at 1.0 every generation would add the same
-/// length while doubling the branch count, and the rim would pack into a solid
-/// thicket within three levels of filling the frame.
-constant float TREE_TRUNK  = 0.145;
+/// Lengths shrink geometrically after it, so one colony's radius is the partial
+/// sum TRUNK * (1 - SHRINK^n)/(1 - SHRINK) — 0.45 at ten levels. SHRINK is also
+/// what keeps the outer levels legible: at 1.0 every generation would add the
+/// same length while doubling the branch count, and the rim would pack into a
+/// solid thicket within three levels of filling the frame.
+///
+/// Halved from 0.145 when the primaries were scattered. At the old length a
+/// single colony reached 0.83 — past the corners — so a frame-filling network
+/// meant one colony's *interior*, and the interior of a branching tree is the
+/// sparse part. Every good-looking capture of this form was taken at the moment
+/// the growing margin happened to be crossing the frame, and by half a minute
+/// later that margin was off-screen for good. Smaller colonies, more of them,
+/// and the margins stay where they can be seen.
+constant float TREE_TRUNK  = 0.045;
 constant float TREE_SHRINK = 0.870;
 
 /// Half-angle of a fork, in radians, and how far a branch's own angle is free
@@ -157,20 +163,65 @@ constant float TREE_TAPER = 0.860;
 /// black wedges cutting across the colony, running clean off the frame. A
 /// stunted branch still has its subtree, folded into a knot a third of the
 /// size, so there is always something there and the edge is soft.
+/// How long a branch dawdles before it starts, in levels, on top of everything
+/// its ancestors already dawdled.
+///
+/// Without it the tree grows in **lockstep**: `reveal` was a function of the
+/// level number alone, so all 2^n branches of a generation extended in perfect
+/// unison and stopped in perfect unison. What that looks like is not a growing
+/// front — it is a pom-pom. Every colony's margin was a dense simultaneous
+/// shell of tips, arriving and freezing together, and then the next shell.
+///
+/// The delay ACCUMULATES down the tree rather than being drawn fresh per level,
+/// and that is load-bearing rather than tidy. Drawn fresh, a child with a small
+/// delay under a parent with a large one begins before its parent has finished
+/// extending — which puts a branch in mid-air, hanging off a tip that has not
+/// reached it yet. Accumulated, a child's start is its parent's completion plus
+/// its own wait, so detachment is impossible for the same reason it was before:
+/// there is nowhere for a detached thing to live.
+constant float TREE_JITTER = 0.62;
+
 constant float TREE_STOP  = 0.11;
 constant float TREE_STUNT = 0.55;
 
-/// Three primaries, held back from each other so the first thing on screen is
-/// **one** line. STAGGER is in levels: at half a level apart, the second trunk
-/// starts about three seconds after the first.
+/// How many colonies there are, where they start, and how far apart.
 ///
-/// All three are tested for every pixel rather than picking the nearest by
-/// angle. Wedging the screen into thirds would be cheaper and is wrong — by
+/// **They do not share an origin, and that is the whole pattern.** Three trunks
+/// leaving one point is a starburst: three fans with hard black voids between
+/// them and an unmistakable centre that everything radiates from. It was legible
+/// and it was not a mycelium — a real mat has no middle, because it was seeded
+/// from many spores at once and what you are looking at is where they met.
+///
+/// So each primary gets its own seed point, scattered on a golden-angle spiral
+/// (irrational turn, so no two land on a common ray however many there are) with
+/// a hash jitter on top so it isn't a visible phyllotaxis either. Radius goes as
+/// sqrt(i) to keep the areal density even instead of crowding the rim.
+///
+/// Every primary is tested for every pixel rather than picking the nearest by
+/// angle or by seed. Wedging the screen up would be cheaper and is wrong — by
 /// level six a branch has wandered well past 60 degrees from its trunk, so the
-/// wedge boundary would cut it off mid-air along a straight radial line.
-constant float TREE_PRIMARIES = 3.0;
-constant float TREE_STAGGER   = 0.50;
-constant float TREE_TILT      = 0.40;   // so the trunks aren't axis-aligned
+/// wedge boundary would cut it off mid-air along a straight line.
+/// The scatter is an ELLIPSE, not a disc, and squashed to roughly the frame's
+/// own aspect. A phone is about 0.46 wide for 1.0 tall, so a circular scatter of
+/// radius 0.40 puts most of the spores past the left and right edges and the
+/// visible column gets only whatever grew back inwards — which showed up as two
+/// dark vertical bands hugging the sides. Landing them where the frame actually
+/// is costs one multiply and is the difference between a mat and a stripe.
+constant float TREE_PRIMARIES = 11.0;
+/// Where the spores land, now that this is the home screen's background: spaced
+/// around the frame's PERIMETER, nudged just outside it, each facing in.
+///
+/// `TREE_EDGE_W` is the frame's width for a height of 1 — a phone is about 0.46.
+/// It is a constant rather than the real aspect because the perimeter walk has
+/// to be stable: feeding it a live aspect would slide every spore along the edge
+/// whenever the view resized, and a background that reshuffles itself on a
+/// rotation is worse than one that is slightly off on an iPad.
+constant float TREE_EDGE_W     = 0.46;
+constant float TREE_EDGE_OUT   = 1.04;   // how far outside the frame they start
+constant float TREE_EDGE_SPRAY = 1.30;   // heading spread, radians, either side
+constant float TREE_TILT      = 0.40;   // so the scatter isn't axis-aligned
+
+constant float TREE_STAGGER = 0.16;   // levels between one spore and the next
 
 /// How far the fuzz reaches off a cord: a multiple of that cord's own
 /// half-width, plus a floor.
@@ -205,6 +256,11 @@ constant float TREE_TEX_SCALE = 5.5;
 /// read this whole form has been fighting.
 constant float AGE_EMERGE = 0.05;   // a cord fades up right at the tip
 constant float AGE_TIP    = 0.42;   // reach of the bright growing tip
+
+/// …and how bright a tip stays once it is no longer one. Not zero — see the
+/// note where it's used. Growth still reads because a fresh tip is 1/TIP_REST
+/// times brighter than a settled node, not because settled nodes are dark.
+constant float TIP_REST   = 0.10;
 constant float AGE_THICK  = 2.20;   // cords reach full width
 constant float AGE_MID    = 1.10;   // the mid net starts filling in
 constant float AGE_FINE   = 2.60;   // fine hyphae fill the gaps last
@@ -216,9 +272,9 @@ constant float AGE_SETTLE = 5.00;   // and then the mat goes quiet again
 /// only part anyone can follow — is a thin ring around a screenful of noise.
 /// Old mat drops toward half brightness and loses most of its fine hyphae, so
 /// the light is where the growth is.
-constant float MAT_SETTLED_DIM  = 0.60;
+constant float MAT_SETTLED_DIM  = 1.00;
 constant float MAT_FINE         = 0.60;   // fine hyphae, freshly filled in
-constant float MAT_FINE_SETTLED = 0.38;   // and once the mat has quieted
+constant float MAT_FINE_SETTLED = 0.60;
 
 /// Both of those are far gentler than they were, and the reason is that the
 /// legibility problem they were solving is gone. They existed because the mat
@@ -262,257 +318,18 @@ constant float MAT_GAMMA = 1.55;
 /// as `age` passes AGE_TIP — so a settled colony has no hot spots left and the
 /// screen doesn't slowly accumulate brightness. `front` peaks at 1, so this is
 /// the multiple of white a brand-new tip reaches.
-constant float MAT_TIP_HEAT = 3.2;
+constant float MAT_TIP_HEAT = 4.9;
 
-/// Tunnel geometry. COLUMNS is how many beads go around the corridor and
-/// **must stay a whole number** — theta wraps at the negative x-axis and the
-/// column coordinate jumps by exactly this there, so an integer lands back on
-/// the tiling and anything else leaves a seam down that line.
-///
-/// ROW is the height of one row in log-radius. It is not free: the beads are
-/// round, rows are staggered half a column, and circles pack tightest when the
-/// row spacing is sqrt(3)/2 of the column spacing. So ROW = (TAU / COLUMNS) *
-/// 0.866. Change COLUMNS and this has to move with it or the packing opens up.
-///
-/// COLUMNS also sets how deep the corridor looks, which is less obvious. Fewer
-/// beads around means each is bigger on screen AND each row is taller in
-/// log-radius, so fewer rings fit between the rim and the vanishing point. 22
-/// was a long shaft; 17 is a bowl of marbles.
-constant float TUNNEL_COLUMNS = 17.0;
-constant float TUNNEL_ROW = 0.3200;
 
-/// Bead radius, in column widths.
-///
-/// An earlier version of this comment claimed a hard ceiling of half the
-/// nearest-neighbour distance — 0.433, falling out of the shear — because going
-/// over it fused rows of beads into columns. That was true of the version that
-/// tested only the pixel's own rectangular cell. It stopped being true the
-/// moment the nine-way nearest-centre search went in, and the reason is worth
-/// keeping: with nearest-site assignment, two overlapping discs don't blend
-/// into a blob, they meet along the perpendicular bisector between their
-/// centres. Overlap is a *flat contact*, which is what a jar of marbles under
-/// its own weight actually looks like.
-///
-/// So this is free to go past 0.5, and the useful range runs to about 0.577 —
-/// the circumradius of the packing, where the last triple-point gaps close and
-/// there is no mortar left at all.
-constant float TUNNEL_BEAD = 0.475;
-
-/// How square. 0 is circles; 1 is a superellipse of order four, which is a
-/// rounded square. Squareness closes the packing without moving the centres —
-/// a square of half-width 0.5 reaches 0.71 into its corners — so the triple-
-/// point gaps shrink and the beads meet along longer flats.
-constant float TUNNEL_SQUARE = 0.42;
-
-/// How much of a cylinder rather than a sphere. This is the whole difference
-/// between a marble and a rod: a sphere's normal turns in both directions at
-/// once and its highlight is a dot, while a cylinder's turns in one and its
-/// highlight is a LINE down the axis. At 0.65 the surface bends mostly across
-/// the corridor, so each bead carries a long straight glint running outward and
-/// its ends stay flat and bright, the way a cut rod's do.
-constant float TUNNEL_CYL = 0.65;
-
-/// The mortar between beads glows and a wave runs down it.
-///
-/// TRAVELLING, not blinking. A wave moving along the corridor keeps total
-/// screen luminance essentially constant — the bright part is always somewhere,
-/// just not here — whereas the same swing applied globally is whole-field
-/// modulation, which is the one thing this shader must never do. WAVE is in
-/// cycles per row and DRIFT is radians per second, so a fixed point sees
-/// DRIFT/TAU = 0.09 Hz. Two orders of magnitude below the photosensitive band.
-///
-/// FLOOR was 0.07 and is now zero, which is a reversal worth writing down. The
-/// floor came from a direct request — the gaps should glow and pulse rather
-/// than be black — and it did that, but a floor is a floor everywhere, so the
-/// corridor came out as a lit grey room with beads in it. Measured against the
-/// reference the difference was stark: 67% of that frame is near-black and
-/// 2.2% is genuinely blown out, and ours had 26% near-black and *zero* pixels
-/// above 200/255. The glow was there. The dark it needs to sit against wasn't.
-///
-/// So the pulse survives and the floor doesn't. SHARP raises the wave to a
-/// power, which pins the troughs at zero and narrows the peak into a band, and
-/// SWING nearly doubles to pay for the narrowing. Brighter than it ever was,
-/// over less of the corridor, against black.
-constant float TUNNEL_GAP_WAVE  = 1.9;
-constant float TUNNEL_GAP_DRIFT = 0.58;
-constant float TUNNEL_GAP_FLOOR = 0.0;    // and now it really is black
-constant float TUNNEL_GAP_SWING = 1.55;
-constant float TUNNEL_GAP_SHARP = 3.0;
-
-/// …and how the bright band gets to be bright, which took one wrong turn to
-/// find. Removing the floor put the mortar's brightness into `t`, and `t` is a
-/// palette coordinate — so a bright band was a band FURTHER ALONG THE RAMP, at
-/// 0.43 of it, which in these palettes is cream. Gaps came out pale exactly
-/// where the light was strongest. The corridor was black in the shadowed
-/// sectors and a white wash in the lit ones, which is worse than the floor it
-/// replaced and for the same underlying reason: brightness had again been
-/// spelled as colour.
-///
-/// So the band barely moves `t` — it stays down at the dark end of the ramp
-/// with the rest of the corridor — and it goes into `shade` instead, which
-/// multiplies after the palette and has no ceiling. The result is a saturated
-/// dark colour turned up past white rather than a pale one: an emitting seam,
-/// which is what the reference has and what a lighter grey can never be.
-///
-/// 1.6 puts the peak of the band at ~3.5x white, so the bloom pass carries it.
-constant float TUNNEL_GAP_GLOW = 1.6;
-
-/// The hot core at the vanishing point. STRENGTH multiplies `shade`, so 3.4
-/// puts the middle of the corridor at over four times white — carried by the
-/// float accumulation buffer instead of clipped, and picked up by the bloom
-/// pass, which is the entire point of it. TIGHT is the falloff: 420 makes the
-/// core about 0.05 field units across, roughly 5% of screen height.
-///
-/// Tiny on purpose, and the reason is in the note by `depth`. This form's
-/// history is sampled slightly inward every frame, so anything broad at the
-/// centre gets dragged outward across the whole screen and re-added as fog. A
-/// core this small has no wide tail to drag and its trail is gone in three
-/// frames.
-constant float TUNNEL_CORE       = 3.4;
-constant float TUNNEL_CORE_TIGHT = 420.0;
-
-/// Rows per second of travel. **This is a safety constant, not a taste one.**
-/// Bright tiles sweeping outward past dark gaps is periodic whole-field
-/// luminance modulation at exactly one cycle per row — so this number, in rows
-/// per second, is a flicker frequency in Hz. The photosensitive band starts
-/// around 3Hz. Do not raise it into single digits.
-///
-/// 0.30 was picked as "obviously safe" without anything to check it against,
-/// and it was too slow: at that rate the corridor drifts rather than travels,
-/// which is most of why this form read as marbles turning instead of as a ride.
-///
-/// 0.62 is measured. Fitting a similarity transform between successive frames
-/// of the reference clip gives it travelling at 0.145–0.335 log-radius per
-/// second; ours was 0.096. Dividing by TUNNEL_ROW puts the reference at
-/// 0.45–1.05 rows per second, and 0.62 sits in the middle of that. It is still
-/// nearly five times clear of 3Hz — the headroom was never the constraint, the
-/// absence of a number to aim at was.
-constant float TUNNEL_SPEED = 0.62;
-
-/// How far the rings wind into spiral arms. Swept through zero by a slow sine,
-/// so the form passes through concentric rings and out the other side into
-/// spirals leaning the opposite way.
-///
-/// Down from 1.3, then from 0.75, and the last cut bought two things at once.
-/// Shear is what lets neighbouring beads approach each other (see TUNNEL_BEAD),
-/// so less of it raises the ceiling on the radius and the packing can close up
-/// — and a shallower spiral reads as rounder and more gathered. There is still
-/// plenty of it: the colour travelling outward in a spiral is the whole reason
-/// this form isn't a target, and that survives at 0.30 intact.
-constant float TUNNEL_TWIST = 0.30;
-
-/// Lobes. Without these the packing is a rigid lattice being rotated, and it
-/// reads exactly like that — marbles spinning, not a corridor flowing. Bending
-/// the log-polar coordinates *before* the packing means the whole lattice
-/// waves: rows swell and pinch, beads slide against their neighbours, and the
-/// highlights slide across them because the surface under them moved.
-///
-/// **LOBES must be a whole number**, for the same reason TUNNEL_COLUMNS is.
-/// These are driven off the raw angle, which jumps a full turn at the negative
-/// x-axis; sin(a * L) only survives that jump if L is an integer.
-/// Amplitude is capped by shape, not by taste. The warp is not conformal — its
-/// derivative with respect to the angle shears the row axis — so a bead that is
-/// a circle in the warped coordinates comes back to the screen as an ellipse,
-/// and the stretch scales with LOBE_R * LOBES. At 0.085 with three lobes every
-/// bead was an egg and the packed-marble read was gone. Half that keeps the
-/// wave and leaves them round enough to stay marbles.
-constant float TUNNEL_LOBES  = 3.0;
-constant float TUNNEL_LOBE_R = 0.036;  // how much the rings swell and pinch
-constant float TUNNEL_LOBE_A = 0.026;  // and how much they lean side to side
-
-/// A wave travelling *down* the corridor, which is a different thing from the
-/// lobes and does the job the lobes couldn't.
-///
-/// The lobes bend the angle, and bending an angle shears — the warp isn't
-/// conformal, so amplitude turns beads into eggs and the useful range is tiny.
-/// This one only ever moves the log-radius, and its derivative is a pure
-/// stretch along the row axis: rows bunch up and spread apart as it passes and
-/// the beads stay the shape they were. Amplitude is therefore free in a way the
-/// lobes' never was, which is why this can be a wave you actually see.
-///
-/// A * K is the stretch, so those two trade against each other: 0.09 * 1.8
-/// packs and unpacks the rows by about a sixth as the wave goes by. TILT makes
-/// the wavefront a spiral rather than a ring, and **must be a whole number** —
-/// it multiplies the raw angle, which jumps a full turn at the negative x-axis.
-///
-/// It runs at 0.55 / 1.8 = 0.31 log-radius per second against the beads' own
-/// 0.198, so the wave still overtakes them and the corridor flexes rather than
-/// the whole lattice sliding as one piece — but by 1.6x now rather than 3.2x,
-/// since the beads sped up and this didn't. That is the right side to lose the
-/// margin on: this is the one thing left that is *supposed* to move against the
-/// travel, and a flex that outruns the corridor threefold reads as the corridor
-/// wobbling. If the wave stops reading at all, raise RATE rather than cutting
-/// TUNNEL_SPEED, which has a measurement behind it and this doesn't.
-constant float TUNNEL_WAVE_A    = 0.090;
-constant float TUNNEL_WAVE_K    = 1.80;
-constant float TUNNEL_WAVE_RATE = 0.55;
-constant float TUNNEL_WAVE_TILT = 2.0;
-
-/// The colour is a spiral coming out of the middle, and the beads have none of
-/// their own.
-///
-/// The version before this hashed a hue per bead, which made a jar of mixed
-/// marbles — every bead a painted object carrying its own colour around. What
-/// a reflective object actually does is the opposite: it has no colour, it
-/// shows you the colour of what's around it, and the colour therefore belongs
-/// to the *room* and stays put while the objects move through it.
-///
-/// So the palette coordinate is a function of position only: a logarithmic
-/// spiral, which in log-polar coordinates is just a straight line, so it costs
-/// one sine. SPIRAL_A is how many arms and **must be a whole number** for the
-/// same seam reason as everything else driven off the raw angle.
-///
-/// **The colour is painted on the corridor and travels with it.** There used to
-/// be a RATE constant here giving the spiral its own outward speed, slower than
-/// the beads', so the two slid against each other. That is a defensible thing
-/// for a light to do and it is not what this form is: two things drifting past
-/// each other at similar speeds reads as neither of them moving, just as
-/// churning. Locked to the beads instead, the colour is a property of the
-/// corridor — the walls are painted, and what changes the colour is that you
-/// are travelling through it. Everything on screen now moves as one piece, and
-/// the form finally has a direction.
-///
-/// SPIRAL_R is low on purpose. It sets how much palette a SINGLE BEAD spans,
-/// and a bead that spans much of the ramp is a rainbow again however the colour
-/// got there. At 0.32 and one arm a bead crosses about a sixth of the ramp,
-/// which leaves the sectors big enough to read as regions of colour rather than
-/// as a gradient — which is what the reference has and what a fine spiral
-/// never gave us.
-constant float TUNNEL_SPIRAL_R    = 0.32;   // colour cycles per unit log-radius
-constant float TUNNEL_SPIRAL_A    = 1.0;    // arms
-
-/// **Nothing per bead touches `t` at all any more, and that is the point.**
-///
-/// Two ways to make a bead look reflective: give it the colour of what's around
-/// it, or give it the *brightness* of what's around it. The first was tried
-/// twice and failed twice, both times for the same reason — `t` is a scalar
-/// into a cosine palette that runs a full cycle over 0..1, so anything sweeping
-/// a decent fraction of that range across one bead is a rainbow on every bead,
-/// however principled the thing doing the sweeping was. It got there first
-/// through the reflection strength and then through the two speculars.
-///
-/// So the colour is purely emitted now. There is a light at the vanishing point
-/// whose colour changes, and it travels outward: `t` is a function of position
-/// and time and nothing else, so every bead in a ring shares a colour and the
-/// colour marches out through them. What makes them look polished is brightness
-/// sliding across their faces — `env`, `rim` and the two speculars, all of
-/// which go through `shade` and `detail`, neither of which can move the hue. A
-/// mirror in a room lit by one colour is exactly this.
-///
-/// This is the knob for how much the light reads as light rather than as tint.
-constant float TUNNEL_LIGHT = 0.42;
-
-/// How much light reaches the side of a bead facing away. Low enough that the
-/// terminator is unmistakable — a sphere is legible as a sphere because of
-/// where it goes dark, not because of its highlight — and high enough that the
-/// dark side keeps its colour instead of becoming a silhouette.
-constant float TUNNEL_AMBIENT = 0.30;
-
-// **This struct is declared twice** — here and in FieldRenderer.swift. There is
+// **This struct is declared twice** — here and in Uniforms.swift. There is
 // no shared header and nothing checks that they agree, so adding a field to one
 // side still compiles cleanly and silently reinterprets memory on the other.
 // Every field is a float4 for the same reason: no padding, so the two layouts
 // can only disagree in ways that are obvious to read.
+//
+// Extend it at the END. Appending leaves every offset above it untouched, so a
+// change applied to one side and not the other costs one garbage value rather
+// than shifting the whole struct by sixteen bytes.
 struct Uniforms {
     float4 resTime;     // xy = resolution px, z = time s, w = breath phase 0..1
     float4 groundCount; // x = grounding 0..1, y = bloom count, z = seed, w = form
@@ -522,6 +339,16 @@ struct Uniforms {
     float4 palB;        //                    amplitude
     float4 palC;        //                    frequency
     float4 palD;        //                    phase
+
+    // Four scratch floats driven by Field Lab's sliders (ios/tools/FieldLab).
+    // The app always sends zero.
+    //
+    // These are a probe, not a feature. To tune a constant, temporarily swap it
+    // for u.lab.x, sweep it with the mouse, then write the number you found
+    // into the constant and put the constant back. **Nothing committed may read
+    // lab** — a form that does looks right in the lab and then renders with
+    // that whole term at zero on a phone.
+    float4 lab;
 };
 
 // xy = position in field space, z = birth time, w = strength.
@@ -613,8 +440,21 @@ static inline void kaliLayer(float2 z, float2 c,
 /// Kaleidoscope — sixfold mirror symmetry over a Kali-set inversion fractal,
 /// falling forever into itself. The orbit traps supply self-similar detail at
 /// every scale, which is the thing that rewards looking closer.
+// Every form takes `lab` and no form reads it. It is the debug probe described
+// on `Uniforms.lab` — four floats coming straight from Field Lab's sliders.
+//
+// It is a parameter rather than something the functions reach for because they
+// can't reach: a form function is `static inline` and gets values, not the
+// uniform block, and the tunnel already has a local called `u`. Without this you
+// cannot sweep any constant that lives inside a form, which is all of the
+// interesting ones.
+//
+// An unused parameter costs nothing — it never survives inlining. What it buys
+// is that probing a constant is a one-line edit inside the function you are
+// already reading, instead of a signature change, a call-site change, and a
+// compile to find out you missed one.
 static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
-                                      thread float &detail) {
+                                      float4 lab, thread float &detail) {
     // Fold into one wedge and mirror. Doing this before the fractal means the
     // detail is symmetric rather than symmetry being painted over noise.
     const float segments = 6.0;
@@ -677,384 +517,382 @@ static inline float kaleidoscopeField(float2 p, float drift, float breathWave,
          + breathWave * 0.04;
 }
 
-/// Tunnel — a logarithmic spiral corridor, built in log-polar coordinates.
+// MARK: - Tunnel: removed 2026-08-07
+//
+// A log-polar vortex: three families of logarithmic spirals whose pitch decided
+// what each was *seen as* — two loop families three degrees apart overlapping in
+// flower-of-life lens shapes, and a near-radial third that carried the rotation,
+// because a striped pattern can only be seen to move perpendicular to its own
+// stripes. It ended with a nineteen-second build-and-release, per-family
+// parallax, atmospheric falloff and four single-family palettes.
+//
+// It went because Jacob cut it, not because it was broken, and his reasoning is
+// worth keeping: the forms that have worked in this project worked almost
+// immediately. Kaleidoscope never drew a complaint and lobes landed on its first
+// showing. The tunnel and the mycelial between them absorbed nearly every round
+// ever spent here, and neither converged.
+//
+// Four things in it are worth stealing before they are forgotten, and all four
+// are still written up in ios/README.md:
+//
+//   - A surge has to be an INTEGRAL, not a multiplier. Multiplying speed by
+//     something that rises and falls drags the whole picture backwards when it
+//     falls; integrating the extra distance is monotone by construction.
+//   - What makes a palette match itself is the amplitude `a`, not the frequency
+//     `c`. A neutral base can reach every hue on the wheel however you wind it.
+//   - Parallax is not pitch. Pitch is how a family is wound and therefore what
+//     it is seen as; rate is how fast it arrives and therefore how far away it
+//     reads. One shared rate makes the whole frame a single sheet of pattern.
+//   - The gaps between bright lines need the unsharpened field in them, or the
+//     thing reads as lines rather than as a place.
+//
+// git log ios/Mycelium/Mycelium/Field/Field.metal for the code.
+
+// ── Lobes ──────────────────────────────────────────────────────────────────
+//
+// Ported from the WebGL prototype in experiments/eight-lobe-tunnel. That page
+// draws its own RGB and tone-maps it; this file's contract is a palette
+// coordinate plus `shade`, so the port is a rewrite of the colour half and a
+// transcription of the geometry half. What survived unchanged is the part that
+// makes it: beads live on a grid in (log-radius, angle), so they are evenly
+// spaced in perspective and pile up toward the vanishing point on their own.
+//
+// The prototype's `u_lobes` slider is a constant 8 here. Everything it fed —
+// `lobeCorrection = smoothstep(5, 8, u_lobes)` and the four mixes keyed to it —
+// evaluates to 1 at eight and is folded out. If the count ever becomes a knob
+// again, those mixes have to come back; they are not decoration, they retune
+// bead size and lobe contrast for low counts.
+
+constant float LOBES_N = 8.0;
+
+/// Radial cells crossed per second, and therefore the rate beads pass a fixed
+/// point on screen. **SAFETY constant.** This is the fastest repeating thing in
+/// the form and it reads as a taste knob, which is exactly the trap: the
+/// photosensitivity band starts around 3 Hz, and the prototype's 2.65 sits close
+/// enough to it that a later "make it faster" would walk straight in. 1.15 Hz is
+/// the same journey at a pace that leaves headroom, and it also fixed something
+/// unrelated — at 2.65 the beads crossed a phone's pixel grid fast enough to
+/// crawl, because the cells near the rim are only a few pixels apart.
+constant float LOBES_ZOOM = 1.15;
+
+/// Palette travel, in full traverses per second. Slow on purpose: the lobe index
+/// already steps the colour eight ways around the wheel across the frame, so
+/// this only has to keep the whole arrangement from sitting still.
+constant float LOBES_COLOR_SPEED = 0.055;
+
+/// How far around the palette the eight lobes reach. Not 1.0, and this is the
+/// difference between the form and a bag of confetti: at full span each lobe
+/// gets a hue a quarter-turn from its neighbour, the strands stop belonging to
+/// each other, and what reads is a rainbow dot matrix. The prototype avoided
+/// this without having to think about it, because its ramp was three analogous
+/// colours; the app's palettes are full wheels, so the narrowing has to happen
+/// here. At 0.32 the eight lobes are one colour family with the far lobes just
+/// distinguishable from the near ones, which is what makes the corridor read as
+/// one object. The palette still travels its whole range over time — that is
+/// LOBES_COLOR_SPEED's job, and it is unaffected by this.
+constant float LOBES_HUE_SPAN = 0.32;
+
+/// Bead brightness, and the superlinear boost inside a bead core.
 ///
-/// Take (log r, theta) instead of (x, y) and two things become true. A
-/// logarithmic spiral turns into a straight line, so a plain square grid in
-/// that space comes back as this spiral when you map it to the screen. And
-/// zooming turns into *translation*, which is the whole reason this form is
-/// cheap: the kaleidoscope and mycelial both pay double to cross-fade two
-/// octaves so their zoom can be endless, and this one needs none of it. Tiles
-/// simply scroll, forever, out of an infinite integer grid.
+/// Two numbers because they do different jobs and were found separately. GAIN
+/// alone could hit the reference near-black but left nothing above white — the
+/// whole frame sat mid-tone, because unlike the tunnel's `fil` the bead light is
+/// not sharpened and its halo is as wide as its core. GLOW keyed to `core`
+/// rather than to the light is what puts the bead centres past white while
+/// leaving their halos under it.
 ///
-/// Two constraints are structural rather than aesthetic:
+/// Keyed to `core`, not to `light`: an earlier pass multiplied by
+/// (1 + glow·light²) and it flattened out, because `light` is well under 1
+/// everywhere so the cube barely moved. `core` is ~1 inside a bead and 0
+/// outside, which is exactly the mask this wants.
+constant float LOBES_GAIN = 4.2;
+constant float LOBES_GLOW = 4.0;
+
+/// The haze between the beads. Small, and it earns its place: at zero the gaps
+/// read as a flat black card with dots on it rather than as distance. It is not
+/// an exposure control — sweeping it from 0 to 0.6 moved near-black by three
+/// points, because what actually fills this frame is the bead halos.
+constant float LOBES_HAZE = 0.35;
+
+/// One bead layer. Returns its light; reports which lobe it belongs to (as a
+/// palette coordinate) and how much of it is solid core rather than halo.
 ///
-/// TUNNEL_COLUMNS must stay a whole number. Theta wraps at the negative x-axis
-/// and the column coordinate jumps by exactly that value there; an integer
-/// jump lands on the same point in the tiling and nothing shows, while any
-/// other value leaves a hard seam down that line. The shear is free to be
-/// fractional — it multiplies the row coordinate, which doesn't jump.
-///
-/// TUNNEL_SPEED is a safety constant. High-contrast beads sweeping outward is
-/// periodic whole-field luminance modulation at one cycle per row, so the rate
-/// in rows per second IS a flicker frequency in Hz. See the note in the README;
-/// this form is the one place in the app where going faster is not a taste
-/// question.
-///
-/// `pxSize` is one screen pixel in field-space units. It is what keeps the
-/// vanishing point alive: see the anti-aliasing note below.
-///
-/// `shade` is a straight brightness multiplier applied after the palette, and
-/// it exists because a scalar `t` cannot express a lit sphere. Darkening a bead
-/// through `t` walks it toward zero, which these palettes render as black —
-/// correct at the end and a full trip round the colour wheel on the way, so
-/// every bead comes out a rainbow. Shading has to be a multiply on the colour,
-/// not a move along it. Forms that don't light anything return 1.
-static inline float tunnelField(float2 p, float drift, float breathWave,
-                                float pxSize, thread float &detail,
-                                thread float &shade) {
+/// `scale`, `phase` and `weight` are what make two of these read as depth rather
+/// than as one layer drawn twice — different zoom, different jitter, different
+/// brightness. The prototype ran three. The third was dropped here after
+/// measuring: it cost a third of the form's time and, once the field is behind
+/// the app's bloom instead of the prototype's own tone map, it is not visible.
+static inline float lobeLayer(float2 p, float time, float breathWave,
+                              float phase, float scale, float weight,
+                              float pxSize, float span,
+                              thread float &tOut, thread float &coreOut) {
+    p *= scale;
     float r = max(length(p), 1e-6);
-    float a = atan2(p.y, p.x);
+    float angle = atan2(p.y, p.x);
 
-    float lr = log(r) - breathWave * 0.05;
+    // One pixel, in this layer's units. The prototype used res.y/scale for the
+    // same job; going through pxSize instead is what keeps bead size honest on a
+    // phone, since the app's field space is aspect-corrected and the prototype's
+    // was not.
+    float toPixels = 1.0 / max(pxSize * scale, 1e-6);
 
-    // Kept before the warps: the colour field belongs to the room, not to the
-    // lattice, so it is built from where a pixel actually is rather than from
-    // where the packing has been bent to.
-    float lrRoom = lr;
+    float slowMorph = sin(time * 0.17 + phase) * 0.55;
 
-    // ── The wave, and the lobes ────────────────────────────────────────────
-    // Applied to the coordinates, before anything is tiled. That's the whole
-    // trick: distort the space and the packing distorts with it, so beads slide
-    // against their neighbours and their highlights travel across them, rather
-    // than a rigid lattice being spun on the spot.
+    // The twist is why the beads run in curved strands instead of straight
+    // spokes: it is a rotation that grows with log-radius, so it shears the
+    // whole grid into a spiral.
+    float twist = 0.34 * log(r + 0.042) - time * 0.075
+                + 0.12 * sin(r * 5.0 - time * 0.38 + phase);
+    angle += twist;
+
+    // The lobes. A radius modulation in angle, so the tunnel's cross-section is
+    // a flower rather than a circle. The second harmonic at N+2 is what stops
+    // the eight lobes reading as a mechanical cog.
+    float flower = 1.0
+        + 0.255 * sin(LOBES_N * angle - time * 0.31 + slowMorph)
+        + 0.042 * sin((LOBES_N + 2.0) * angle + time * 0.19 - phase);
+
+    // Breath drives the section in and out. The prototype had its own sine here;
+    // taking the app's `breathWave` instead is what makes grounding reach this
+    // form — `drift` is already slowed, but the section pulse would not have been.
     //
-    // The travelling wave first, and it does most of the work — it is the only
-    // one of these that is free to have real amplitude, because it moves the
-    // log-radius alone and so only ever stretches rows rather than shearing
-    // them. See the constants.
-    lr += TUNNEL_WAVE_A * sin(lr * TUNNEL_WAVE_K - drift * TUNNEL_WAVE_RATE
-                              + a * TUNNEL_WAVE_TILT);
-
-    // Then the lobes, which bend the ring itself. Two waves crossing at
-    // different rates, one of which also depends on the radius, so the swell
-    // travels down the corridor instead of standing still. Every rate here is
-    // roughly half what it was: with the wave carrying the motion, what these
-    // were adding was spin, and spin was the complaint.
-    lr += TUNNEL_LOBE_R * (sin(a * TUNNEL_LOBES + drift * 0.048)
-                           + 0.62 * sin(a * (TUNNEL_LOBES * 2.0)
-                                        - drift * 0.034 + lr * 1.5));
-    a  += TUNNEL_LOBE_A * sin(lr * 2.3 - drift * 0.040);
-
-    // Minus, so beads sweep outward past you and the corridor comes toward the
-    // viewer. Plus reverses it into a retreat, which reads as falling backwards.
-    float rows = lr / TUNNEL_ROW - drift * TUNNEL_SPEED;
-    float cols = a / TAU * TUNNEL_COLUMNS;
-
-    // The shear is the whole look. At zero the packing is concentric rings;
-    // wind it up and the rings tilt into spiral arms. Sweeping it slowly
-    // through both is far more interesting than either, and costs one sine.
-    float shear = TUNNEL_TWIST * sin(drift * 0.018);
-    cols += rows * shear;
-
-    // ── Where the beads are ────────────────────────────────────────────────
-    // Alternate rows are staggered half a column. Circles on a square lattice
-    // leave a hole at every corner however tightly they're packed — you can
-    // only close those by dropping each row into the notches of the one before
-    // it. Staggered, the six nearest neighbours all sit at the same distance
-    // and the leftover space becomes small curved triangles instead of a
-    // cross-hatch, which is what a jar of marbles actually looks like.
+    // 0.035, where the prototype had 0.105. This is the single most
+    // exposure-sensitive number in the form and it does not look like one.
+    // `breathing` scales `tunnelR`, and `tunnelR` feeds two steep smoothsteps —
+    // bead radius over 0.10…0.98 and the depth shade over 0.08…0.75. A 10%
+    // section pulse walks a large fraction of the beads across both at once, so
+    // the whole frame brightens and dims with the breath: measured over six
+    // times, blown pixels ranged 0.38% to 6.79%, a seventeenfold swing against
+    // the tunnel's twofold. At 0.035 the breath is still visible as the corridor
+    // opening and closing, and the range collapses.
     //
-    // Wrap-safe: theta wrapping jumps the column index by TUNNEL_COLUMNS and
-    // leaves the row index alone, so the stagger matches across the seam.
-    //
-    // The nine-way search is not optional, and skipping it was the bug in the
-    // first version of this. A staggered lattice's cells are hexagons, and the
-    // rectangle you get from floor() is not that hexagon — near a corner of the
-    // rectangle the closest bead centre belongs to the row above. Testing only
-    // the pixel's own rectangle clips every circle against the rectangle it
-    // happens to fall in, and what comes out is a grid of rounded squares.
-    float aspect = TUNNEL_ROW * TUNNEL_COLUMNS / TAU;   // = sqrt(3)/2 as tuned
-    float rowI = floor(rows);
+    // Dead end on the way: the outward `pulse` crest was the obvious suspect and
+    // halving it changed the spread by nothing at all. The tell was that the
+    // bright samples were ~13s apart, which is `Breath.ambientCycleSeconds`, not
+    // the 6.6s of the pulse.
+    float breathing = 1.0 + 0.035 * breathWave;
+    float tunnelR = r * breathing / flower;
 
-    float dq = 1e9;   // squared, until the winner is picked
-    float2 e = float2(0.0);
-    for (int dj = -1; dj <= 1; dj++) {
-        float cj = rowI + float(dj);
-        float stag = fract(cj * 0.5);                  // 0 even rows, 0.5 odd
-        float ci0 = floor(cols - stag);
-        for (int di = -1; di <= 1; di++) {
-            float ci = ci0 + float(di);
-            float2 off = float2(cols - (ci + stag + 0.5), rows - (cj + 0.5));
-            // Back into real log-polar units. Index space is neither square nor
-            // orthogonal — a column is TAU/COLUMNS wide while a row is
-            // TUNNEL_ROW tall, and the shear tilts the row axis on top of that
-            // — so a circle measured there would squash and lean with the
-            // twist. Undone, the map to the screen is conformal and a circle
-            // here is a circle on screen, at any shear and any radius.
-            float2 ee = float2(off.x - shear * off.y, off.y * aspect);
-            // Nearest centre by SQUARED distance. Twenty-seven square roots ran
-            // in here — three per candidate, nine candidates — to compute a
-            // metric whose only job inside the loop is to be compared. Squared
-            // Euclidean orders the candidates identically for the round part
-            // and within a few percent for the squared part, and the real
-            // metric is computed once, outside, for whichever won.
-            float d2 = dot(ee, ee);
-            if (d2 < dq) { dq = d2; e = ee; }
+    float radial = -log(tunnelR + 0.025) * 18.5 + time * LOBES_ZOOM + phase * 3.7;
+    float angular = angle / TAU * 64.0
+                  + radial * 0.215
+                  + 1.4 * sin(log(tunnelR + 0.08) * 2.1 - time * 0.22 + phase);
+
+    float2 cellId = floor(float2(radial, angular));
+
+    // Nearest bead, searched over the three radial neighbours only. Angular
+    // neighbours are not searched and do not need to be: the grid is 64 cells
+    // around against a handful visible across the frame, so the angular spacing
+    // on screen is always the smaller of the two and the nearest bead is never
+    // an angular cell away. Searching all nine tripled the cost for an image
+    // that measured identical.
+    float depthLobeCenter = (0.5 * M_PI_F + time * 0.31 - slowMorph) / LOBES_N;
+    float best = 1e5;
+    float2 beadPixels = 0.0;
+    float tRadial = 0.0, tTunnelR = 0.0, tAngle = 0.0, tDepth = 0.5;
+
+    for (int n = -1; n <= 1; n++) {
+        float2 id = cellId + float2(float(n), 0.0);
+        float jx = (hash21(id + phase) - 0.5) * 0.12;
+        float jy = (hash21(id.yx + phase * 4.0) - 0.5) * 0.10;
+        float cRadial  = id.x + 0.5 - jx;
+        float cAngular = id.y + 0.5 - jy;
+
+        // Invert the forward map to get the bead's own position. This is the
+        // expensive half of the form and it is unavoidable: the grid is defined
+        // in warped space, so a cell's centre in screen space is only knowable
+        // by running the warp backwards.
+        float cTunnelR = max(exp(-(cRadial - time * LOBES_ZOOM - phase * 3.7) / 18.5) - 0.025,
+                             0.002);
+        float cAngle = TAU / 64.0 * (cAngular - cRadial * 0.215
+                     - 1.4 * sin(log(cTunnelR + 0.08) * 2.1 - time * 0.22 + phase));
+        float cFlower = 1.0
+            + 0.255 * sin(LOBES_N * cAngle - time * 0.31 + slowMorph)
+            + 0.042 * sin((LOBES_N + 2.0) * cAngle + time * 0.19 - phase);
+        float cR = cTunnelR * cFlower / breathing;
+
+        // Alternate lobes sit slightly nearer and slightly further, which is
+        // what gives the eight a front-and-back rather than a flat rosette.
+        float cRawLobe = fract((cAngle - depthLobeCenter) / TAU) * LOBES_N;
+        float cDepth = 0.5 + 0.5 * cos(M_PI_F * cRawLobe);
+        cR *= 1.0 + (cDepth * 2.0 - 1.0) * (0.034 + 0.006 * sin(time * 0.23 + phase));
+
+        float cTwist = 0.34 * log(cR + 0.042) - time * 0.075
+                     + 0.12 * sin(cR * 5.0 - time * 0.38 + phase);
+        float cBase = cAngle - cTwist;
+        float2 centre = cR * float2(cos(cBase), sin(cBase));
+        float2 px = (p - centre) * toPixels;
+        float d = length(px);
+
+        if (d < best) {
+            best = d; beadPixels = px;
+            tRadial = cRadial; tTunnelR = cTunnelR; tAngle = cAngle; tDepth = cDepth;
         }
     }
 
-    // Now the real metric, once. Superellipse rather than circle — see
-    // TUNNEL_SQUARE — which closes the packing without moving any centres.
-    float2 sq = e * e;
-    dq = mix(sqrt(sq.x + sq.y),
-             sqrt(sqrt(sq.x * sq.x + sq.y * sq.y)),
-             TUNNEL_SQUARE);
+    // Which lobe this bead belongs to, blended across the boundary so a strand
+    // crossing between lobes changes colour smoothly instead of snapping.
+    float alignedAngle = tAngle - depthLobeCenter;
+    float rawLobe = fract(alignedAngle / TAU) * LOBES_N;
+    float nearest = floor(rawLobe + 0.5);
+    float delta = fract(rawLobe + 0.5) - 0.5;
+    float blended = mix(nearest, nearest + sign(delta),
+                        0.5 * smoothstep(0.26, 0.50, abs(delta)));
 
-    // ── The vanishing point ────────────────────────────────────────────────
-    // Beads shrink without limit toward the centre, and the previous version
-    // gave up on them early — faded the structure out below r = 0.075 and left
-    // a flat disc, which is a ninth of the screen height rendered as one solid
-    // colour sitting where the depth cue should be.
-    //
-    // The real problem was never the small beads, it was aliasing, and aliasing
-    // is fixed by knowing how big a pixel is rather than by deleting the
-    // detail. One pixel spans pxSize/(r*ROW) rows and pxSize*COLUMNS/(TAU*r)
-    // columns — both blow up as 1/r, which is exactly the rate the beads shrink
-    // — so widening the edge by that much makes each bead soften into its own
-    // average precisely when it stops being resolvable. Structure survives to
-    // within a few pixels of the centre and dissolves instead of aliasing.
-    float aaRow = pxSize / (r * TUNNEL_ROW) * aspect;
-    float aaCol = pxSize * TUNNEL_COLUMNS / (TAU * r);
-    float aa = clamp(0.7 * max(aaRow, aaCol), 0.004, 0.9);
+    // One full traverse of the palette per eight lobes. The prototype's ramp was
+    // three named colours wide and wrapped with mod 3; the app's palette is
+    // periodic in t with period 1, so the mapping is just the lobe fraction.
+    float chase = 0.5 + 0.5 * sin(tRadial * 0.34 - time * 0.56 + tAngle * 0.72 + phase);
+    // `span` is LOBES_HUE_SPAN already scaled by the palette's own `spread`.
+    // At 1 the eight lobes get eight neighbouring hues and the frame is a colour
+    // gradient; near 0 they all get the SAME hue and the only thing still moving
+    // the colour is the time term below — which is the whole of the Rainbow
+    // palette, one hue at a time across the entire frame.
+    tOut = blended / LOBES_N * span + time * LOBES_COLOR_SPEED + 0.03 * chase;
 
-    float bead = smoothstep(TUNNEL_BEAD + aa, TUNNEL_BEAD - aa, dq);
+    // ── The bead itself ────────────────────────────────────────────────────
+    float lobeWave = 0.5 + 0.5 * sin(LOBES_N * tAngle - time * 0.31 + slowMorph);
+    float lobePresence = smoothstep(0.02, 0.60, lobeWave);
+    float lobeContrast = mix(0.62, 1.32, lobePresence);
 
-    // ── Cylinder, not sphere ───────────────────────────────────────────────
-    // `u` is still the round silhouette coordinate — the rim, the contact
-    // shading and the anti-aliasing all want the outline. The NORMAL is a
-    // different question, and the answer is what makes a rod a rod: it bends
-    // mostly across the corridor and barely along it, so the face stays flat
-    // over the whole length of the bead and the highlight becomes a line rather
-    // than a dot. See TUNNEL_CYL.
-    float u = min(dq / TUNNEL_BEAD, 1.0);
-    float2 sn = float2(e.x / TUNNEL_BEAD,
-                       e.y / TUNNEL_BEAD * (1.0 - TUNNEL_CYL));
-    float h = sqrt(max(1.0 - min(dot(sn, sn), 1.0), 0.0));
+    float ribbon = smoothstep(-0.18, 0.92,
+        0.68 + 0.32 * sin(tAngle * LOBES_N * 0.5 + tRadial * 0.095 - time * 0.25));
+    float mainLobe = smoothstep(0.76, 0.98, ribbon);
+    float primaryLayer = smoothstep(0.82, 1.0, weight);
 
-    // ── Two highlights, and they are the whole material ────────────────────
-    // What separates glass from painted plastic isn't gloss level, it's that a
-    // glass bead carries two or three highlights in DIFFERENT colours — light
-    // splitting on the way through — and that they're stretched arcs rather
-    // than round dots, because the thing being reflected is a window or a strip
-    // light, not a point.
-    //
-    // Both fall out of one trick: an anisotropic falloff around the point where
-    // the normal faces the light. The first is the cylinder's own: tight across
-    // and effectively unbounded along, so it runs the full length of the bead
-    // as one unbroken streak. The second crosses it, and because they add
-    // different amounts to `t` they land as two different colours.
-    float2 d1 = (sn - float2(-0.34, 0.00)) * float2(8.2, 0.75);
-    float2 d2 = (sn - float2( 0.42, 0.16)) * float2(2.6, 5.2);
-    float s1 = exp(-dot(d1, d1) * 3.0) * bead;
-    float s2 = exp(-dot(d2, d2) * 3.4) * bead;
+    // Beads grow toward the rim and shrink toward the vanishing point, which is
+    // the perspective cue doing most of the work here.
+    float radialSize = smoothstep(0.10, 0.98, tTunnelR);
+    float radiusPixels = (0.95 + 9.90 * pow(radialSize, 1.18))
+        * mix(1.10, 1.40, smoothstep(0.70, 1.0, weight))
+        * 0.78
+        * mix(0.86, 1.14, tDepth)
+        * mix(0.30, 1.0, weight)
+        * mix(1.0, 0.90, mainLobe);
 
-    // ── Reflection ─────────────────────────────────────────────────────────
-    // A banded environment, looked up by the surface NORMAL rather than by
-    // position. That's the part that reads as reflective: the bands are fixed
-    // in the world, so they slide across a bead whenever the surface under them
-    // turns, and two neighbouring beads show different parts of the same room.
-    // A pattern painted in bead-local coordinates instead looks like decoration
-    // on the ball, however shiny it is.
-    float env = 0.5 + 0.5 * sin(sn.x * 7.5 - sn.y * 5.3 + h * 4.4 + drift * 0.16);
-    env = env * env * env * bead;
+    float aa = max(fwidth(best), 0.72);
+    float core = smoothstep(radiusPixels + aa, radiusPixels - aa, best);
 
-    // Bright edge where the sphere turns away — the giveaway of a transparent
-    // ball, which gathers light around its silhouette instead of going dark.
-    float rim = smoothstep(0.66, 0.99, u) * bead;
+    float isolation = mix(1.0, mix(0.30, 1.0, primaryLayer), mainLobe);
+    core *= isolation;
 
-    // ── The thing that makes them balls ────────────────────────────────────
-    // Real diffuse falloff, with a real terminator. The previous version put a
-    // token amount of this into `detail`, which only ever brightens — so every
-    // bead was uniformly lit and read as a printed circle. A sphere is legible
-    // as a sphere because of where it goes DARK.
-    float ndl = dot(normalize(float3(-0.34, 0.44, 0.83)), float3(sn, h));
-    float lit = TUNNEL_AMBIENT + (1.0 - TUNNEL_AMBIENT)
-                               * pow(clamp(ndl * 0.5 + 0.5, 0.0, 1.0), 1.6);
+    float halo = exp(-mix(0.82, 1.38, mainLobe) * max(best - radiusPixels * 0.48, 0.0));
+    halo *= 0.72 * isolation * mix(1.0, 0.76, mainLobe)
+          * mix(0.70, 1.12, tDepth) * (1.0 + 0.22 * (1.0 - primaryLayer));
 
-    // Contact shading. Beads sit in a packing, and the light doesn't reach far
-    // into the crevices between them — darkening toward the silhouette is what
-    // seats each one among its neighbours instead of floating it on top.
-    lit *= mix(1.0, 0.62, smoothstep(0.55, 1.0, u));
+    // Sphere shading. The bead is treated as a ball: reconstruct a normal from
+    // how far the pixel is from the centre, then light it. This is the whole
+    // reason they read as pearls and not as flat dots, and it is also why the
+    // form needs `shade` rather than only `t` — a lit ball has to be able to go
+    // dark on its far side without travelling through the palette to get there.
+    float nd = best / max(radiusPixels, 0.001);
+    float sphereDepth = sqrt(max(0.0, 1.0 - nd * nd));
+    float3 normal = normalize(float3(beadPixels / max(radiusPixels, 0.001),
+                                     sphereDepth + 0.001));
+    float3 lightDir = normalize(float3(-0.48, 0.58, 0.92));
+    float3 halfway = normalize(lightDir + float3(0.0, 0.0, 1.0));
+    float diffuse  = 0.36 + 0.64 * max(dot(normal, lightDir), 0.0);
+    float specular = pow(max(dot(normal, halfway), 0.0), 30.0) * core;
+    float rim      = pow(1.0 - sphereDepth, 2.2) * core;
 
-    // Highlights are far higher frequency than the bead outline, so they alias
-    // first. Fade them where a bead is only a few pixels across; below that the
-    // bead is already averaging out and a stray glint would be the only thing
-    // left flickering.
-    float sharp = smoothstep(0.34, 0.10, aa);
-    s1 *= sharp; s2 *= sharp; rim *= sharp; env *= sharp;
+    float edgeFade   = 1.0 - smoothstep(0.85, 1.55, r);
+    float centreFade = smoothstep(0.0015, 0.009, r);
 
-    // ── The light, which is emitted at the middle and travels out ──────────
-    // A function of position and time, and of nothing else. No hash, no cell
-    // index, no surface normal — see TUNNEL_LIGHT for why anything per bead in
-    // here has twice come out as a rainbow on every bead.
-    //
-    // Built from `lrRoom`, the log-radius from before the wave and the lobes
-    // bent it, so the colour stays clean sectors while the lattice flexes
-    // underneath it rather than pumping along with the rows.
-    //
-    // The travel term is the beads' own — TUNNEL_ROW * TUNNEL_SPEED is their
-    // speed in log-radius per second, and this is exactly that. So the colour
-    // does not drift against the corridor at all; it IS the corridor, and it
-    // arrives because you're moving. See TUNNEL_SPIRAL_R.
-    float lrTravel = lrRoom - drift * TUNNEL_SPEED * TUNNEL_ROW;
-    float lightPhase = TAU * lrTravel * TUNNEL_SPIRAL_R
-                     + a * TUNNEL_SPIRAL_A;
-    float spiral = 0.5 + 0.5 * sin(lightPhase);
+    // A slow swell running outward. pow 7 makes it a travelling crest rather
+    // than the whole field breathing — at pow 1 this was a global brightness
+    // oscillation, which is the one shape the no-strobe rule cares about most.
+    float pulse = 0.88 + 0.34 * pow(0.5 + 0.5 * cos(tRadial * 0.34 - time * 0.95), 7.0);
 
-    // And it reads as light rather than as tint because it carries brightness
-    // with it, a quarter turn ahead of the colour — so the leading edge of an
-    // arm is the bright part, which is what a source sweeping past looks like.
-    //
-    // Safe as whole-field modulation because it TRAVELS: the bright part is
-    // always somewhere, just not here, so total screen luminance barely moves.
-    // Same argument as the mortar pulse below.
-    float lightLift = 1.0 + TUNNEL_LIGHT * sin(lightPhase - 1.5708);
+    float light = (core * 1.12 + halo * 0.82)
+                * ribbon * lobeContrast * pulse
+                * edgeFade * centreFade * weight
+                * mix(0.68, 1.13, tDepth);
+    light *= mix(1.0, diffuse, core);
+    light += specular * 0.34 + rim * 0.12;
+    light *= 0.28 + 0.72 * smoothstep(0.08, 0.75, tunnelR);
 
-    // ── The mortar ─────────────────────────────────────────────────────────
-    // Beads overlap, so what's left is small curved triangles rather than a
-    // grid of lines. Three versions: unlit, which put them at t = 0 and read as
-    // dead; then a uniform glow with a wave over it, which lit them but lit
-    // them *everywhere* and turned the corridor into a grey room; and now a
-    // wave with no floor under it, so the gaps are black except where the band
-    // is passing. See TUNNEL_GAP_FLOOR for the measurement that settled it.
-    float gap = 1.0 - bead;
-    float pulse = 0.5 + 0.5 * sin(rows * TUNNEL_GAP_WAVE - drift * TUNNEL_GAP_DRIFT);
-    pulse = pow(pulse, TUNNEL_GAP_SHARP);
-    float mortar = gap * (TUNNEL_GAP_FLOOR + TUNNEL_GAP_SWING * pulse);
-
-    // Distance, as brightness rather than as a hole. Smooth and unbounded
-    // rather than a masked disc, so it never has an edge of its own — the beads
-    // keep rendering straight through it and only get brighter.
-    //
-    // Kept deliberately small, because the feedback pass amplifies it in a way
-    // nothing else here is subject to: this form's history is sampled slightly
-    // inward every frame, so whatever sits at the centre gets dragged outward
-    // across the whole screen and re-added. A centre glow that looks modest in
-    // one frame comes back as a pale fog over everything a few seconds later.
-    float depth = 1.0 / (1.0 + r * 11.0);
-
-    // And the thing `depth` was never allowed to be. Same idea — brightness
-    // toward the middle — but a hundredth of the area, which is what buys it
-    // permission to be forty times stronger. It goes into `shade` rather than
-    // into `t`, so it is a light and not a colour, and it is the first thing in
-    // this shader deliberately allowed past white. See TUNNEL_CORE.
-    float hot = 1.0 / (1.0 + r * r * TUNNEL_CORE_TIGHT);
-
-    // `env` and `depth` are both kept lean, and for the same reason: this
-    // form's history is sampled slightly inward every frame, so any broad
-    // brightness gets dragged outward across the whole screen and re-added as
-    // fog. Tight highlights survive that; washes compound.
-    // The highlights go here, and this is the third place they have been.
-    //
-    // Not in `t`: that is the palette coordinate, so a glint there is a
-    // different colour rather than a brighter one, and every bead came out
-    // striped. Not in `shade` either, which is where they went next — `shade`
-    // is a raw multiply and stacking four highlights into it pushed pixels to
-    // three times white. Nothing downstream is built for that: the contrast
-    // curve, the tonemap and the saturation lift all clip per channel, at
-    // different points, so what came out was hard-edged rainbow spikes.
-    //
-    // `detail` mixes toward `palette(t + 0.18)` at a bounded weight. It lifts,
-    // it nudges the hue slightly, and it cannot blow out. That bound is the
-    // whole reason it is the right channel for this.
-    detail = clamp(s1 * 1.25 + s2 * 0.95 + rim * 0.60 + env * 0.60
-                   + depth * 0.30 + mortar * 0.16, 0.0, 1.0);
-
-    // Only the beads are shaded. The mortar is a light source, not a surface,
-    // so it keeps its own brightness.
-    //
-    // Both multiplied by the travelling light. `shade` is applied after the
-    // palette, so this is the one place the light can change how bright things
-    // are without dragging their colour anywhere.
-    //
-    // It stays near 1 everywhere except the core, and the difference between
-    // that and the highlights that used to live here is spatial: four glints on
-    // every bead at 3x white is the whole screen over white, which the contrast
-    // curve and the tonemap each clip at a different point, and what comes out
-    // is rainbow spikes. One spot 5% of the screen across at 4x white is a
-    // light. The clipping was never about the magnitude.
-    // Two emitters in here now, and neither is a surface. The core is one; the
-    // mortar band is the other, and it lands on `shade` for the same reason —
-    // see TUNNEL_GAP_GLOW for the pale-gaps detour that established it.
-    shade = mix(1.0, lit, bead)
-          * lightLift
-          * (1.0 + TUNNEL_CORE * hot + TUNNEL_GAP_GLOW * mortar);
-
-    // Hue dominates `t` and the body shading stays out of it. That split
-    // matters more than it looks: `t` is the palette coordinate, so anything
-    // moving it moves colour, and an early version gave the body gradient
-    // enough weight that shading swept the hue clean across every bead — every
-    // one its own small rainbow. `lit` goes to `detail`, which lifts brightness
-    // and only nudges hue.
-    //
-    // The two highlights are the deliberate exception. They're tight enough to
-    // read as coloured glints rather than as a gradient, and the fact that they
-    // move `t` by different amounts is exactly what makes them different
-    // colours — which is the one thing that says glass.
-    // Every weight here is a move along the palette, and there are almost none
-    // left. A bead's colour is the light's colour where it sits, full stop.
-    //
-    // The mortar is now inside that same bracket rather than added beside it,
-    // and the change is not cosmetic. Added beside, a gap band had a hue of its
-    // own — a fixed 0.26 along the ramp regardless of where the arm was — so at
-    // the new SWING it would have swept half the palette on its own and come
-    // back striped, which is the third time this form would have found that
-    // particular wall. Inside, the mortar is lit BY the spiral like everything
-    // else: the gaps come up when the arm crosses them and are black when it
-    // has gone. Which is also the honest reading of what he asked for — the
-    // colour comes out of the middle, and the gaps are part of what it reaches.
-    // The mortar's weight here is small and stays small. It exists only so the
-    // gaps sit in the same family of colour as the corridor around them rather
-    // than at a flat t = 0; everything that makes the band *bright* happens in
-    // `shade`. 0.12 puts its peak at 0.19 of the ramp, still in the dark end.
-    float lightT = 0.14 + 0.86 * spiral;
-    return (bead + mortar * 0.12) * lightT
-         + depth * 0.06;
+    coreOut = core;
+    return light;
 }
 
-/// Weave — Truchet tiling. Every cell holds two quarter-circle arcs, flipped
-/// by a per-cell hash, and the arcs always meet at the cell edges. The result
-/// is one continuous woven maze that never repeats and never breaks. The grid
-/// drifts and turns so the weave reorganises without ever cutting.
-static inline float weaveField(float2 p, float drift, float breathWave,
-                               thread float &detail) {
-    float rot = drift * 0.015;
-    float cs = cos(rot), sn = sin(rot);
-    float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
+/// Lobes — an eight-lobed corridor of pearl beads, falling away from you.
+///
+/// Beads sit on a grid in (log-radius, angle) rather than in the plane, so the
+/// spacing you see is perspective rather than a texture: they crowd toward the
+/// vanishing point without any of it being drawn that way. The cross-section is
+/// a flower, not a circle, which is where the eight comes from — and the lobes
+/// alternate slightly near and far, so the corridor has a front and a back.
+static inline float lobesField(float2 p, float drift, float breathWave,
+                               float pxSize, float span, float4 lab,
+                               thread float &detail, thread float &shade) {
+    // The whole field turns, slowly and unevenly. Without this the eight lobes
+    // are pinned to the screen's axes and the form reads as a logo.
+    float spin = -drift * 0.085 + 0.045 * sin(drift * 0.21);
+    float cs = cos(spin), sn = sin(spin);
+    p = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
 
-    q = q * (7.5 + breathWave * 0.25);
-    q += float2(drift * 0.035, drift * 0.021);   // slow travel across the weave
+    // Two layers. The second is rotated, offset, run at a different rate and a
+    // different scale — four separate reasons for it not to line up with the
+    // first, which is what keeps the depth from collapsing into moiré.
+    float tA, coreA;
+    float lightA = lobeLayer(p, drift, breathWave, 0.0, 1.0, 1.0, pxSize, span, tA, coreA);
 
-    float2 cell = floor(q);
-    float2 f = fract(q);
+    float rB = 0.075 + 0.035 * sin(drift * 0.27);
+    float cb = cos(rB), sb = sin(rB);
+    float2 pB = float2(p.x * cb - p.y * sb, p.x * sb + p.y * cb)
+              + float2(0.011 * sin(drift * 0.31), 0.009 * cos(drift * 0.23));
+    float tB, coreB;
+    float lightB = lobeLayer(pB, drift * 0.93, breathWave, 1.9, 1.105, 0.58, pxSize, span, tB, coreB);
 
-    // The hash picks which diagonal the arcs run along. Flipping x mirrors the
-    // tile, which is the whole trick — both orientations still meet their
-    // neighbours at the edge midpoints, so the ribbon is always continuous.
-    if (hash21(cell) < 0.5) f.x = 1.0 - f.x;
+    // ── The room the beads are in ──────────────────────────────────────────
+    float r = max(length(p), 1e-6);
+    float a = atan2(p.y, p.x);
 
-    // Distance to the nearer of the two quarter arcs.
-    float d = min(length(f), length(f - 1.0));
-    float ribbon = abs(d - 0.5);
+    float lobeWave = 0.5 + 0.5 * sin(LOBES_N * a - drift * 0.31);
+    float lobes = smoothstep(0.0, 0.64, lobeWave);
+    float gap = mix(0.60, 1.0, lobes);
 
-    // Two widths: a band for colour, a tight core for the bright thread. The
-    // band was 0.42 wide at first, which blurred the ribbon into lava — the
-    // appeal of this form is that the edges are hard, so it stays narrow.
-    float band = 1.0 - smoothstep(0.05, 0.26, ribbon);
-    detail = 1.0 - smoothstep(0.0, 0.055, ribbon);
+    float haze = exp(-2.0 * r) * (0.066 + 0.074 *
+        (0.5 + 0.5 * sin(7.0 * log(r + 0.12) + (LOBES_N - 1.0) * a - drift * 0.12)));
+    haze += 0.060 * lobes * exp(-1.35 * r);
+    haze += 0.018 * (1.0 - lobes) * exp(-1.08 * r);
 
-    return band * 0.85 + ribbon * 0.55 + breathWave * 0.04;
+    // A hue spiral in the emptiness. Faint, and the form needs it: without any
+    // structure between the beads the gaps read as a flat black card with dots
+    // on it rather than as distance.
+    float spiral = smoothstep(0.18, 0.86,
+        0.5 + 0.5 * sin(8.5 * log(r + 0.10) + LOBES_N * a - drift * 0.35));
+    haze += spiral * exp(-1.25 * r) * 0.124;
+    haze *= gap * LOBES_HAZE;
+
+    // Background colour comes from the same lobe index the beads use, so the
+    // haze behind a lobe is that lobe's colour and the corridor stays coherent.
+    float bgCentre = (0.5 * M_PI_F + drift * 0.31) / LOBES_N;
+    float bgRaw = fract((a - bgCentre) / TAU) * LOBES_N;
+    float bgNearest = floor(bgRaw + 0.5);
+    float bgDelta = fract(bgRaw + 0.5) - 0.5;
+    float bgLobe = mix(bgNearest, bgNearest + sign(bgDelta),
+                       0.5 * smoothstep(0.30, 0.50, abs(bgDelta)));
+    float bgT = bgLobe / LOBES_N * span + drift * LOBES_COLOR_SPEED;
+
+    // The vanishing point. A ring rather than a disc — a disc here is a lamp
+    // sitting on top of the picture, which is the same mistake the tunnel's
+    // `core` term made and had to be walked back from.
+    float portal = exp(-pow((r - 0.0095) * 145.0, 2.0)) * (0.72 + 0.28 * sin(drift * 0.62));
+
+    float light = lightA + lightB;
+
+    // t follows whichever layer is brighter here, falling back to the room's own
+    // colour where there are no beads. Averaging the two layers' t was tried
+    // first and it is wrong: two beads of different colours overlapping produced
+    // the colour halfway between them, which is a third bead that isn't there.
+    float tBead = (lightA >= lightB) ? tA : tB;
+    float t = mix(bgT, tBead, saturate(light * 3.0));
+
+    float coreMax = max(coreA, coreB);
+    shade = light * LOBES_GAIN * (1.0 + LOBES_GLOW * coreMax * coreMax) + haze + portal * 0.30;
+    detail = saturate(coreMax * 0.85 + portal * 0.4);
+    return fract(t);
 }
 
 /// Cheap three-octave fbm. The five-octave one is more than the strand
@@ -1287,29 +1125,88 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
     hit.dens = 0.0;
 
     for (int t = 0; t < int(TREE_PRIMARIES); t++) {
-        // The trunks don't start together. Half a level apart is about three
-        // seconds, which is enough that the first thing on screen is one line
-        // and not a three-pointed star.
-        float grow = grown - float(t) * TREE_STAGGER;
+        float ft = float(t);
+
+        // The spores don't germinate together, but only just — a sixth of a
+        // level apart. They used to be half a level, back when there were three
+        // of them stacked on one origin and the point was that the first thing
+        // on screen should be a single line. It isn't any more: the colony now
+        // opens already meshed (see `Colony.startLevels`), so a long stagger
+        // only buys a visibly last-place colony trailing the rest forever.
+        float grow = grown - ft * TREE_STAGGER;
         if (grow <= 0.0) continue;
+
+        // ── Where this spore landed: ON THE EDGE, facing in ───────────────
+        // The colony is the home screen's background now rather than a form you
+        // choose, and that changes where it starts. A scatter through the middle
+        // grows *outward* into the frame from several centres, so the busiest
+        // part of the picture ends up exactly where the title and the cards are.
+        // Seeded around the perimeter facing inward, the frame fills from its
+        // margins and the middle is the last place to arrive — which is the
+        // right shape for something that has to sit behind type.
+        //
+        // Perimeter position comes from walking a rectangle by arc length, so
+        // the long sides get proportionally more spores than the short ones and
+        // a phone's tall frame doesn't crowd all of them onto the top and
+        // bottom. The golden-ratio step means no two land on the same side by
+        // construction, however many there are.
+        float hs   = hash21(float2(ft, 5.13));
+        float walk = fract(ft * 0.6180339887 + TREE_TILT + (hs - 0.5) * 0.06);
+
+        // Half-perimeter in units where the frame is 1 tall and TREE_EDGE_W wide,
+        // split so `walk` maps to a lap of the rectangle.
+        float halfW = TREE_EDGE_W * 0.5;
+        float sideW = TREE_EDGE_W / (TREE_EDGE_W + 1.0) * 0.5;   // one short side
+
+        float2 origin;
+        float inward;      // the heading that points at the middle
+        if (walk < sideW) {                      // bottom
+            origin = float2(mix(-halfW, halfW, walk / sideW), -0.5);
+            inward = 0.0;
+        } else if (walk < 0.5) {                 // right
+            origin = float2(halfW, mix(-0.5, 0.5, (walk - sideW) / (0.5 - sideW)));
+            inward = -TAU * 0.25;
+        } else if (walk < 0.5 + sideW) {         // top
+            origin = float2(mix(halfW, -halfW, (walk - 0.5) / sideW), 0.5);
+            inward = TAU * 0.5;
+        } else {                                 // left
+            origin = float2(-halfW, mix(0.5, -0.5, (walk - 0.5 - sideW) / (0.5 - sideW)));
+            inward = TAU * 0.25;
+        }
+
+        // Pushed just off-screen so the germination itself happens out of frame
+        // and what you see is hyphae arriving over the edge, not seven dots
+        // appearing on the border and then sprouting.
+        origin *= TREE_EDGE_OUT;
 
         // Rotate the world so this trunk points along +y. Every frame below is
         // relative to the branch it's on, which is what lets one loop body
         // handle every level.
-        float rot = float(t) * (TAU / TREE_PRIMARIES) + TREE_TILT;
+        //
+        // Heading is inward plus a wide hashed spray. Dead-on inward makes seven
+        // parallel columns marching at the frame; the spray is what makes them
+        // wander in and meet each other instead.
+        float rot = inward + (hash21(float2(ft, 17.7)) - 0.5) * TREE_EDGE_SPRAY;
         float c0 = cos(rot), s0 = sin(rot);
-        float2 q = float2(p.x * c0 - p.y * s0, p.x * s0 + p.y * c0);
+        float2 d0 = p - origin;
+        float2 q = float2(d0.x * c0 - d0.y * s0, d0.x * s0 + d0.y * c0);
 
         float idx = float(t) + 1.0;   // the path taken so far, as an integer
         float len = TREE_TRUNK;
         float wid = TREE_WIDTH;
+        float wait = 0.0;             // everything this path has dawdled so far
 
         for (int i = 0; i < TREE_LEVELS; i++) {
-            // How much of this level exists yet. Zero means growth hasn't
+            // How much of this branch exists yet. Zero means growth hasn't
             // reached it, and since children live beyond their parent's tip,
             // that also ends the descent — there is nothing further out to be
             // near.
-            float reveal = clamp(grow - float(i), 0.0, 1.0);
+            //
+            // `wait` is this particular branch's own arrival time on top of its
+            // depth, which is what stops a whole generation extending in
+            // unison. See TREE_JITTER.
+            float born  = float(i) + wait;
+            float reveal = clamp(grow - born, 0.0, 1.0);
             if (reveal <= 0.0) break;
 
             // The branch is a curve up the y axis, only as long as it has had
@@ -1331,7 +1228,7 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             if (d - w < hit.d - hit.w) {
                 hit.d = d;
                 hit.w = w;
-                hit.age = grow - (float(i) + ty);
+                hit.age = grow - (born + ty);
                 hit.id = fract(idx * 0.6180339887);
             }
 
@@ -1357,7 +1254,7 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             float hw = w * TREE_HALO + TREE_HALO_FLOOR;
             float rr = d / hw;
             rr *= rr;
-            hit.dens += smoothstep(0.0, AGE_MID, grow - (float(i) + ty))
+            hit.dens += smoothstep(0.0, AGE_MID, grow - (born + ty))
                       / (1.0 + rr * rr);
 
             // ── Down one level ─────────────────────────────────────────────
@@ -1407,6 +1304,11 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
             float h2 = hash21(float2(idx, 11.3));
             float live = h2 < TREE_STOP ? TREE_STUNT : 1.0;   // some tips give up
 
+            // And this child's own wait, added to its ancestors'. Hashed on the
+            // child's `idx`, so siblings dawdle by different amounts and the two
+            // halves of a fork stop arriving as a pair.
+            wait += hash21(float2(idx, 61.7)) * TREE_JITTER;
+
             // Length jitter, half of it shared by the fork and half the child's
             // own. The shared half is free; the child's own half moves the tip
             // and so nudges the next bisector, which is why it is the smaller
@@ -1435,10 +1337,12 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
 /// couple of levels, and it grows into them.
 static inline float mycelialField(float2 p, float drift, float time,
                                   float breathWave, float tap,
-                                  float grown, float push,
+                                  float grown, float push, float pxSize,
+                                  float4 lab,
                                   thread float &detail, thread float &shade) {
-    p *= 1.0 + breathWave * 0.03;
-    p *= exp2(push);                  // a tap shoves the camera back
+    float warp = (1.0 + breathWave * 0.03) * exp2(push);
+    p *= warp;                        // a tap shoves the camera back
+    pxSize *= warp;                   // and a pixel is that much wider in here
 
     TreeHit h = mycelialTree(p, grown, drift);
     if (h.age <= 0.0) {
@@ -1452,7 +1356,14 @@ static inline float mycelialField(float2 p, float drift, float time,
     float thicken = smoothstep(0.0, AGE_THICK,  age);
     float midAge  = smoothstep(AGE_MID  * 0.30, AGE_MID,  age);
     float fineAge = smoothstep(AGE_FINE * 0.25, AGE_FINE, age);
-    float tip     = exp(-age / AGE_TIP);
+    // Decays to a FLOOR rather than to zero. A tip used to flare and then go
+    // fully out as its branch aged, so once growth reached its cap every
+    // highlight on screen had extinguished itself and what was left was dull
+    // cord — lights going off one by one, which is the other half of why this
+    // form kept getting called dying. At a floor of TIP_REST the junctions stay
+    // lit as permanent nodes and a *fresh* tip is still four times brighter than
+    // them, so growth reads exactly as it did. Nothing on screen ever goes out.
+    float tip     = TIP_REST + (1.0 - TIP_REST) * exp(-age / AGE_TIP);
 
     // ── Settling ───────────────────────────────────────────────────────────
     // Old mat dims and loses most of its fine hyphae. A legibility decision
@@ -1482,10 +1393,41 @@ static inline float mycelialField(float2 p, float drift, float time,
     // cord to the next, which is what a mycelium does and a tree does not.
     float near = min(h.dens, 1.35);
 
-    // Nothing to draw and nothing near enough to fuzz: skip the mat entirely.
-    // That is most of the screen for the first half-minute, and it is what pays
-    // for the descent above.
-    if (core <= 0.0 && near < 0.02) {
+    // ── The advancing tip ──────────────────────────────────────────────────
+    // Every branch currently extending has `age` near zero at its far end, so
+    // this lights up all of them at once — which is the whole thing he asked
+    // for made visible. A growing hypha carries its cytoplasm at the end, and
+    // the bright point travelling ahead of a dim trail is most of what makes a
+    // timelapse read as advancing rather than as appearing.
+    //
+    // It gets its own radius with a PIXEL FLOOR, and does not reuse `core`.
+    // That was one of the two reasons this form measured 0.00% of its pixels
+    // blown out for months while looking, to anyone who looked at it, like it
+    // had bright tips. `core` is a geometric test against `w`, and `w` is the
+    // cord's half-width scaled by mix(0.26, 1, thicken) — at a tip, where
+    // thicken is zero by definition, a deep branch is 0.0007 field units
+    // across. That is a third of a pixel. The brightest thing in the form was
+    // never more than a third covered on any pixel it touched, so the highlight
+    // was real, correct, and invisible. Two pixels is the floor because one
+    // still aliases into the dotted crawl you get from sampling a sub-pixel
+    // line, and these move.
+    float glowR = max(w * 2.0, pxSize * 2.0);
+    float halo  = 1.0 - smoothstep(glowR * 0.35, glowR * 2.0, h.d);
+    float front = halo * tip * emerge;
+
+    // Nothing to draw, nothing near enough to fuzz, and no tip here: skip the
+    // mat entirely. That is most of the screen, and it is what pays for the
+    // descent above.
+    //
+    // `front` has to be in this test, and its absence was the other reason
+    // there were no highlights. `near` is `h.dens`, which weights every branch
+    // by `smoothstep(0, AGE_MID, age)` — so a brand new branch contributes
+    // almost nothing to it, by design. A tip out ahead of the mat therefore
+    // failed both halves of the old test and returned black with `shade` left
+    // at 1.0, *before the line that lights it had run.* The leading tips — the
+    // only part of this form that was ever supposed to be bright — were being
+    // discarded for being too new.
+    if (core <= 0.0 && near < 0.02 && front < 0.02) {
         detail = 0.0;
         return 0.0;
     }
@@ -1498,14 +1440,6 @@ static inline float mycelialField(float2 p, float drift, float time,
     float dTex = 0.0;
     float tex = mycelialLayer(p * TREE_TEX_SCALE, drift, churn,
                               thicken, midAge, fineAge, fineW, dTex);
-
-    // ── The advancing tip ──────────────────────────────────────────────────
-    // Every branch currently extending has `age` near zero at its far end, so
-    // this lights up all of them at once — which is the whole thing he asked
-    // for made visible. A growing hypha carries its cytoplasm at the end, and
-    // the bright point travelling ahead of a dim trail is most of what makes a
-    // timelapse read as advancing rather than as appearing.
-    float front = core * tip * emerge;
 
     // A cord is a BUNDLE of hyphae, not a slab. Rendering the core as a solid
     // gives a flat painted stroke of a single colour — `t` is the palette
@@ -1536,12 +1470,26 @@ static inline float mycelialField(float2 p, float drift, float time,
     // Compressed, and it has to be. `t` is the palette coordinate and these
     // palettes are cosines — they WRAP. Anything past 1 comes back round
     // through the whole colour wheel, so the densest knots, which should simply
-    // be the brightest thing on screen, were coming out fringed in cyan and red
-    // instead. Rolling off keeps the top end inside one trip through the ramp.
+    // be the brightest thing on screen, come out somewhere else entirely.
+    //
+    // **The asymptote is the whole point and it used to be wrong.** At 0.55 the
+    // roll-off tops out at 1/0.55 = 1.82, which is not one trip through the ramp,
+    // it is nearly two — so `t` was free to lap past 1 and land in the far side
+    // of Spore, which is a dull orange-brown. That never showed while settled mat
+    // was dimmed to 60%, because the dimming was holding `raw` down. Take the
+    // dimming out and the dense interior lands squarely in it: mottled brown with
+    // black cell edges speckled through it, which reads as **rot**. Three
+    // separate reports of this form "still dying" and this was the last of them,
+    // and unlike the other two it was not an animation at all — nothing was
+    // fading, the colour was just wrong.
+    //
+    // At 1.05 the asymptote is 0.95 and the wrap is unreachable by construction.
+    // Density now reads as brighter gold rather than as a different substance,
+    // which is what density means in this form.
     //
     // No offset at the bottom: empty space lands at exactly t = 0, which the
     // mycelial palettes render as black.
-    return raw / (1.0 + raw * 0.55);
+    return raw / (1.0 + raw * 1.05);
 }
 
 // MARK: - Field pass
@@ -1617,17 +1565,16 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // ── Form ───────────────────────────────────────────────────────────────
     float detail = 0.0;
-    float shade = 1.0;   // brightness multiply after the palette — see tunnelField
+    float shade = 1.0;   // brightness multiply applied after the palette
     float t;
     if (form == FORM_KALEIDOSCOPE) {
-        t = kaleidoscopeField(p, drift, breathWave, detail);
-    } else if (form == FORM_TUNNEL) {
-        t = tunnelField(p, drift, breathWave, pxSize, detail, shade);
-    } else if (form == FORM_WEAVE) {
-        t = weaveField(p, drift, breathWave, detail);
+        t = kaleidoscopeField(p, drift, breathWave, u.lab, detail);
+    } else if (form == FORM_LOBES) {
+        t = lobesField(p, drift, breathWave, pxSize,
+                       LOBES_HUE_SPAN * u.palA.w, u.lab, detail, shade);
     } else {
         t = mycelialField(p, drift, time, breathWave, tap,
-                          u.colony.x, u.colony.y, detail, shade);
+                          u.colony.x, u.colony.y, pxSize, u.lab, detail, shade);
     }
 
     // Both gestures shift hue as well as brightness, so a touch reads as a
@@ -1666,9 +1613,20 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float3 lo = min(col, 1.0);
     col = lo * lo * (3.0 - 2.0 * lo) + max(col - 1.0, 0.0);
 
-    // A tap lifts the whole field toward the warm end of the palette. No
-    // falloff, no centre — the same everywhere on screen, by design.
-    col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD) * tap * 0.95;
+    // A tap lifts the field toward another point on the palette. No falloff and
+    // no centre — where the finger lands makes no difference, by design.
+    //
+    // It is scaled by what is already lit, and that is not a softening of the
+    // idea, it is what makes it read as one. A flat addition lands on **every**
+    // pixel, so on the two forms that are mostly black — the tunnel especially —
+    // a tap painted the empty gaps between the filaments a solid colour and the
+    // structure vanished into a coloured card for a moment. Light does not do
+    // that. Scaling by luminance means a tap makes the lit parts brighter and
+    // leaves the dark ones dark, so what you see is the corridor flaring rather
+    // than the screen being tinted.
+    float litNow = dot(col, float3(0.299, 0.587, 0.114));
+    col += palette(t + 0.35, u.palA, u.palB, u.palC, u.palD)
+         * tap * 1.35 * saturate(litNow * 1.7);
 
     // Hold pulse: the whole field swells with light and falls back. Applied
     // after the tap so a tap still punches through while you're holding.
@@ -1705,16 +1663,12 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float dt = max(u.holdParams.z, 1.0 / 240.0);
     float fbContract = 0.998;
     if (form == FORM_KALEIDOSCOPE)   fbContract = exp2(-KALEIDO_ZOOM_RATE * dt);
-    // Mycelial's camera is still except during a tap, so its trail is still
-    // too — the idle retreat this used to track is gone, and its removal is
-    // most of why the form reads as growing now rather than as expanding. What
-    // is left is this frame's share of the pullback, which is the one moment
+    // Mycelial's camera is still except while a pinch is moving it, so its
+    // trail is still too — the idle retreat this used to track is gone, and its
+    // removal is most of why the form reads as growing rather than expanding.
+    // What is left is this frame's share of the zoom, which is the one moment
     // the view really moves and so the one moment the ghost would lag.
     else if (form == FORM_MYCELIAL)  fbContract = exp2(u.colony.z);
-    // The tunnel moves coherently too, so it needs the same lock. Its content
-    // travels outward at TUNNEL_ROW * TUNNEL_SPEED in log-radius per second,
-    // and that's a natural log, hence exp rather than exp2.
-    else if (form == FORM_TUNNEL)    fbContract = exp(-TUNNEL_ROW * TUNNEL_SPEED * dt);
     float2 fbUV = (uv - 0.5) * fbContract + 0.5;
     float3 history = prev.sample(smp, fbUV).rgb;
 
@@ -1730,7 +1684,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float inFrame = min(inside.x, inside.y);
     // How much history each form wants is a property of the form, not of two
     // buckets. Mycelial is the one whose appeal genuinely is smear — the mat
-    // wants to look felted. Tunnel and weave live or die on hard edges, and
+    // wants to look felted. Tunnel and lobes live or die on hard edges, and
     // heavy feedback is exactly what softens them.
     //
     // The kaleidoscope sits in between and used to be lumped in with mycelial,
@@ -1745,7 +1699,6 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     // and every frame of history is one more frame of soft focus over it — and
     // this form is the one whose history is dragged outward from a bright
     // centre, so its trail also fogs the mortar it's supposed to leave dark.
-    else if (form == FORM_TUNNEL)       persistBase = 0.26;
     float persistence = mix(persistBase, persistBase + 0.18, grounding);
     col = mix(col, history, persistence * 0.72 * inFrame);
 
@@ -1762,7 +1715,7 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 // so brightness could exceed 1, and nothing had ever put anything there.
 //
 // So two changes, and they only work as a pair. Sources are now allowed past
-// white (TUNNEL_CORE, MAT_TIP_HEAT), and this pass spreads what's up there into
+// white (MAT_TIP_HEAT, LOBES_GLOW), and this pass spreads what's up there into
 // the pixels around it — which is what a real camera does with a real light and
 // what the eye reads as "that thing is emitting," as opposed to "that thing is
 // a pale colour." A hot pixel with hard edges is just a white dot.

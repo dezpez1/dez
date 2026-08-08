@@ -27,11 +27,19 @@ Mycelium/
 ├── Field/
 │   ├── Field.metal            the shader — this is the product
 │   ├── Form.swift             which shape the field takes, and its palettes
-│   ├── FieldRenderer.swift    two-pass ping-pong renderer
+│   ├── FieldRenderer.swift    ping-pong feedback + bloom chain + tonemap
 │   ├── FieldState.swift       taps, breath, grounding, form, palette index
+│   ├── Uniforms.swift         the bytes handed to the shader each frame
 │   └── FieldView.swift        MTKView + touch handling
 └── Grounding/Haptics.swift    breath-paced haptic pulse
+
+tools/FieldLab/               Field.metal off disk, reloading on save
 ```
+
+`Uniforms.swift` is its own file rather than living inside the renderer because
+Field Lab compiles it too — one Swift declaration, so the app and the lab cannot
+disagree. The pairing with `struct Uniforms` in `Field.metal` is still manual and
+still unchecked by anything; extend it at the end.
 
 ## Forms and their palettes
 
@@ -46,15 +54,15 @@ duplication and buys every combination being one worth shipping.
 | Form | |
 |---|---|
 | `kaleidoscope` | Sixfold mirror symmetry over a Kali-set inversion fractal, colored by orbit traps, falling into itself forever. |
-| `tunnel` | A corridor of packed glass beads spiralling away, built in log-polar coordinates — a plain staggered grid in `(log r, theta)` comes back as this. Endless, seamless, and the cheapest form here. |
-| `weave` | Truchet tiling — every cell holds two quarter-arcs flipped by a hash, and they always meet at the edges, so it's one unbroken ribbon that never repeats. |
+| `tunnel` | Two spirals of opposite handedness and near-equal curvature, overlapping into circles stacked on each other and travelling outward past you, crossed by a near-radial ray family that turns. Filaments on black, built in log-polar coordinates where a plain sine comes back as this. Endless, seamless, and the cheapest form here. |
+| `lobes` | An eight-lobed corridor of pearl beads falling away from you. The beads sit on a grid in (log-radius, angle) rather than in the plane, so their spacing on screen is perspective rather than a texture. The cross-section is a flower, not a circle, and alternate lobes sit slightly near and far, so the corridor has a front and a back. Ported from the WebGL prototype in `experiments/eight-lobe-tunnel`. |
 | `mycelial` | Two cellular nets — broad felted cords and a mid net — over a tangle of threads crossing at every angle. Built against a photograph of a real network. Starts as one blob and grows outward forever while the camera retreats from it; what a patch of mat looks like is driven by how long ago the margin passed over it. |
 
 | Form | Palettes |
 |---|---|
 | `kaleidoscope` | Obsidian · Reef · Bone · Vespers |
 | `tunnel` | Prism · Neon · Oilslick · Vapor |
-| `weave` | Rust · Jade · Ash · Saffron |
+| `lobes` | Pearl · Aurora · Ember · Deep |
 | `mycelial` | Spore · Fungal · Deep · Filament |
 
 Mycelial costs two Worley lookups plus two `fbm3` calls and five thread
@@ -184,6 +192,60 @@ stop overlapping. If you raise `tapInterval`, check this table rather than
 assuming slower is safer. Dragging deliberately emits nothing at all — a stream
 of whole-screen flashes at finger speed is exactly the thing being avoided.
 
+#### Why `LOBES_ZOOM` is a safety constant
+
+Beads in the `lobes` form sit on a grid one cell wide in log-radius, so the rate
+you travel down the corridor **is** the rate beads pass a fixed point on screen —
+`LOBES_ZOOM` in Hz, directly, with no conversion. That makes it the fastest
+repeating thing in the form, and it reads like a taste knob, which is the trap.
+
+| | rate |
+|---|---|
+| beads passing (`LOBES_ZOOM`) | **1.15 Hz** |
+| lobe rotation (`0.31 / TAU x 8`) | 0.39 Hz |
+| outward pulse (`0.95 / TAU`) | 0.15 Hz |
+| portal breath (`0.62 / TAU`) | 0.10 Hz |
+| twist drift (`0.075 / TAU`) | 0.01 Hz |
+
+The band starts around 3 Hz. **The prototype ran this at 2.65**, which is not
+inside the band but is one "make it faster" away from it — and the value carries
+nothing in its name to say so. 1.15 is the same journey with headroom, and it
+fixed something unrelated on the way: at 2.65 the beads crawled against the pixel
+grid near the rim, where the cells are only a few pixels apart.
+
+## Field Lab
+
+**Use this for shader work.** [`tools/FieldLab/run.sh`](tools/FieldLab/README.md)
+opens a macOS window that renders `Field.metal` off disk and reloads it about a
+second after you save, with form and palette pickers, a 0.1x–8x time scale, the
+gestures, and four live sliders wired to `u.lab`. It compiles this target's own
+`Form.swift`, `FieldState.swift` and `Uniforms.swift`, so it cannot drift away
+from what the app does.
+
+```bash
+ios/tools/FieldLab/run.sh
+```
+
+It also renders headless, which is how the numbers in the next section were
+measured:
+
+```bash
+ios/tools/FieldLab/run.sh --capture /tmp/t.png --form tunnel --at 12 --stats
+```
+
+Fixed timestep and a pinned seed, so the same command gives a byte-identical
+file. That matters more than it sounds — **the tunnel's tonal statistics swing
+between 15% and 28% near-black depending only on when you look**, as bright
+filaments cross the frame. Two measurements taken at two different moments are
+measuring the clock, not the change you made. Everything below was taken at a
+fixed `--at`.
+
+The seed barely matters by comparison (10.0% to 12.7% across three seeds at the
+same instant), which is the opposite of what you would guess, and is why the
+capture pins the time rather than averaging over seeds.
+
+Everything Xcode is still needed for is below; this is only for the shader.
+
 ## Development shortcuts
 
 `#if DEBUG` only — these can't ship:
@@ -199,10 +261,10 @@ xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field reef
 xcrun simctl launch <udid> com.dez.mycelium -form mycelial -field spore -blooms
 
 # twenty taps in a row, the case that used to blow the field out
-xcrun simctl launch <udid> com.dez.mycelium -form weave -field rust -burst
+xcrun simctl launch <udid> com.dez.mycelium -form lobes -field pearl -burst
 
 # start already grounded, to compare against normal
-xcrun simctl launch <udid> com.dez.mycelium -form weave -field ash -ground
+xcrun simctl launch <udid> com.dez.mycelium -form lobes -field deep -ground
 
 # start with the hold pulse engaged (you can't rest a finger on a headless sim)
 xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field bone -hold
@@ -236,24 +298,23 @@ Most of the feel lives in a handful of constants:
 | brightness of the growing edge | `MARGIN_LINE` |
 | how growth stages behind each tip | `AGE_EMERGE`, `AGE_TIP`, `AGE_THICK`, `AGE_MID`, `AGE_FINE`, `AGE_SETTLE` — in **levels**, not seconds, so a trunk spends far longer thickening than a twig does |
 | the mat texture on the cords | `MAT_SETTLED_DIM`, `MAT_FINE_SETTLED`, `MAT_CELL`, `MAT_GAMMA`, `MAT_THREAD_FREQ`, `TREE_TEX_SCALE`. The Worley layer is a sheath now, not the form |
-| tunnel travel speed | `TUNNEL_SPEED` — rows per second. **Safety constant, see below** |
-| the wave running down the corridor | `TUNNEL_WAVE_A` / `_K` / `_RATE` / `_TILT`. A×K is how much it stretches the rows; TILT **must be a whole number**. This is the one warp free to have real amplitude — see below |
-| how much the beads spin | `TUNNEL_TWIST` and the `drift` rates on the lobes. All roughly halved once the wave was carrying the motion |
-| bead shape | `TUNNEL_SQUARE` (0 = circles, 1 = a rounded square) and `TUNNEL_CYL` (0 = sphere, 1 = a rod). CYL is what makes the highlight a line instead of a dot |
-| the light, and how fast its colour travels out | `TUNNEL_SPIRAL_R` / `_A` / `_RATE` and `TUNNEL_LIGHT`. Nothing per bead touches `t` at all — **read the note below before adding anything that does** |
+| tunnel travel speed | `TUNNEL_SPEED` — log-radius per second. **Safety constant, see below** |
+| tunnel filament sharpness | the `mix(1.0, 5.0, res)` in `tunnelField`. 1 is a plain sine, 5 is a thin bright strand on black. It rides `res` because sharpening is also what aliases |
+| tunnel arm counts | the `5.0` and `3.0` in `ph1` / `ph2`. **Both must be whole numbers** — atan2 wraps at the negative x-axis. Keep them coprime or the interference locks into a grid |
+| tunnel radial frequency | the `1.90` and `1.35`. **Work out the flicker rate before changing either** — see the safety note; it is these times `TUNNEL_SPEED`, minus the rotation's contribution |
+| how fast the tunnel turns | `TUNNEL_SPIN`, rad/sec, applied to family B only. **Rotation is carried by the ray family being wound differently from the arms** — nothing else in the form can show it, see below. Jointly a safety constant with `TUNNEL_ARMS_B`: 8 × 0.55 / TAU = 0.70Hz, the largest flicker term here |
+| the tunnel's rays | `TUNNEL_ARMS_B` (how many), `TUNNEL_PITCH_B` (how straight — 0.15 is 7° off radial, and its being near-radial is the whole mechanism), `TUNNEL_MIX_B` / `TUNNEL_MIX_C` (how bright the rays and the swirl are against the rings; both well under 1 on purpose) |
+| how fast the tunnel's colour travels | `TUNNEL_HUE_K`, in colour cycles per unit log-radius. 0.70; it was 0.30 and that put nearly all the colour in the middle of the frame — see below |
+| tunnel glow | `TUNNEL_GLOW` — how far past white a filament core goes, which is the only reason the bloom pass has anything to catch |
+| the tunnel's vanishing point | the `240.0` in `core` and its `0.35` weight. It multiplies the palette rather than adding white, so it brightens the far distance in the corridor's own colour. The weight was 1.7 and that was still a blob — the filaments converge and brighten on their own, so most of what a big weight adds is a hot spot on structure that didn't need it |
 | how much of the screen the field renders at | `FieldRenderer.fieldScale`. The biggest lever on frame time in the app; see Performance |
-| tunnel bead count | `TUNNEL_COLUMNS` (**must be a whole number**) and `TUNNEL_ROW`, which is *derived*: `(TAU / COLUMNS) * 0.866` for a staggered circle packing. Move one and the other has to follow |
-| tunnel spiral amount | `TUNNEL_TWIST` — swept through zero by a slow sine, so it passes through concentric rings both ways. Capped by the packing, see below |
-| tunnel flow | `TUNNEL_LOBES` (**must be a whole number**), `TUNNEL_LOBE_R`, `TUNNEL_LOBE_A`. Amplitude is capped by shape, not taste — see below |
-| how fast the beads change colour | `TUNNEL_HUE_SLOW` and `TUNNEL_HUE_SPAN`, in rad/sec. Each bead draws its own rate from that range; **never give them a shared one** |
-| how reflective the beads look | `env` — a banded environment looked up by the surface normal. Weight it into `detail`; it's a broad term and broad terms fog through the feedback |
-| tunnel bead size | `TUNNEL_BEAD`, in column widths. Useful up to ~0.577; past 0.5 beads meet along flat contacts, which is what packed marbles do |
-| how deep the corridor looks | `TUNNEL_COLUMNS`. Fewer beads around means each is bigger *and* each row is taller in log-radius, so fewer rings fit before the vanishing point. 22 was a shaft; 17 is a bowl |
-| how 3D the beads read | `TUNNEL_AMBIENT` and the contact-shading `mix(1.0, 0.62, ...)`, both via the `shade` channel. See below — this cannot go through `t` |
-| tunnel mortar glow | `TUNNEL_GAP_WAVE` / `TUNNEL_GAP_DRIFT` (the travelling pulse), `TUNNEL_GAP_SWING` / `TUNNEL_GAP_SHARP` (how bright the band is and how narrow), `TUNNEL_GAP_GLOW` (how far past white it goes). `TUNNEL_GAP_FLOOR` is 0 and should stay there — see *Nothing in this app was ever bright* |
-| how bright anything gets | `BLOOM_THRESHOLD` / `BLOOM_STRENGTH` / `BLACK_POINT` in the present pass, and the three emitters: `TUNNEL_CORE`, `TUNNEL_GAP_GLOW`, `MAT_TIP_HEAT` |
-| weave tile size and line width | `q * 7.5` and the two `smoothstep` widths in `weaveField` |
-| edge crispness | `persistBase` — tunnel and weave hold far less history than the other two, because feedback is exactly what softens a hard edge |
+| how bright anything gets | `BLOOM_THRESHOLD` / `BLOOM_STRENGTH` / `BLACK_POINT` in the present pass, and the two emitters: `TUNNEL_GLOW`, `MAT_TIP_HEAT` |
+| lobe count | `LOBES_N`. Not a free knob — everything the prototype keyed to `smoothstep(5, 8, u_lobes)` was folded out at eight, and a different count needs those mixes back. |
+| how bright the beads are | `LOBES_GAIN`, and `LOBES_GLOW` for the boost inside a core. Keyed to `core`, not to the light — see the note there. |
+| how far the eight lobes reach around the palette | `LOBES_HUE_SPAN`. At 1.0 it is confetti. |
+| how fast you fall down the corridor | `LOBES_ZOOM` — **safety constant**, see below |
+| how hard the breath opens the corridor | `breathing` in `lobeLayer`. The most exposure-sensitive number in the form and it does not look like one. |
+| edge crispness | `persistBase` — tunnel and lobes hold far less history than the other two, because feedback is exactly what softens a hard edge |
 | mycelial cord weight | `0.22 + 0.16 * wr.x` — the noise term is what makes cords read as felted masses instead of drawn strokes |
 | mycelial cell scale | the `7.0` and `17.0` frequencies. Roughly 15 coarse cells across a screen reads as a mat; 4 reads as a diagram |
 | thread density | `228.0 + 19.0 * fk` — spacing per direction. **Each layer needs its own**, see below |
@@ -422,7 +483,7 @@ two buckets, crisp and not, and the kaleidoscope was lumped in with mycelial at
 0.66 — a quarter of every pixel was trail, filling the open areas of the fractal
 with a smear of where they had just been. Half of that form's "blurry solid
 patches" was this and not the fractal at all. It sits at 0.50 now; mycelial keeps
-0.66 because a felted look is genuinely what that form is for; tunnel and weave
+0.66 because a felted look is genuinely what that form is for; tunnel and lobes
 stay at 0.34 because feedback is exactly what softens a hard edge.
 
 ### Flat washes in an orbit-trap fractal
@@ -636,14 +697,134 @@ single line": for the first five seconds there is one filament on screen and
 nothing else, and the other two trunks are held back half a level each so it
 isn't a three-pointed star either.
 
-#### Tap to make room
+#### One tree is a starburst. A mat is many.
 
-The colony fills the frame and then sits there, which is a finished thing to look
-at and nothing to do. A tap shoves the camera back — `zoomPush`, in octaves —
-which shrinks the colony on screen, and shrinking it is exactly what buys room
-for finer levels: an octave of pull-back is worth `ln2 / -ln(TREE_SHRINK)` = 4.98
-more of them. So the tap gets you a smaller colony **and** somewhere new for it
-to grow, and it grows there over the next few seconds.
+The tree fixed the topology and left a composition problem that four rounds of
+tuning never touched, because it was never a tuning problem.
+
+Three primaries leaving a single origin is a **starburst**: three fans with hard
+black voids between them and an unmistakable centre that everything radiates
+from. Worse, one colony reached radius 0.83 against frame corners at 0.55, so a
+frame-filling picture meant looking at one colony's *interior* — and the interior
+of a branching tree is the sparse part. Every good-looking capture of this form
+turned out to have been taken at the moment the growing margin happened to be
+crossing the frame. Half a minute later that margin was outside the frame for
+good, and what was left on screen was the hollow middle, settled and dimmed:
+81.9% of the frame near black, and none of the bright growing edge visible
+anywhere, ever again.
+
+So the primaries were scattered. Seven of them now, each with its own seed point
+and its own hashed heading, on a golden-angle spiral squashed to the frame's
+aspect, and each colony reaching 0.45 instead of 0.83. There is no centre because
+there are seven of them; the voids close because neighbouring colonies' sheaths
+overlap; and every colony's margin is somewhere inside the frame. Near-black went
+81.9% → 58%, which is the reference's neighbourhood, without touching a single
+brightness constant.
+
+Two details that are load-bearing rather than tidy:
+
+- **The scatter is an ellipse.** A phone is 0.46 wide for 1.0 tall, so a circular
+  scatter of radius 0.4 lands most of the spores past the left and right edges
+  and the visible column gets only what grew back inwards. That showed up as two
+  dark vertical bands hugging the sides. `TREE_SEED_SQUASH` is one multiply.
+- **The headings are hashed, not spread evenly.** Evenly spaced headings on
+  scattered origins still read as a pinwheel — the eye finds the shared rotation
+  long before it notices the offsets.
+
+#### Lockstep, and why the tips came out as pom-poms
+
+`reveal` was a function of the level number alone, so all 2^n branches of a
+generation extended in perfect unison and stopped in perfect unison. What that
+looks like is not a growing front — it is a **pom-pom**: a dense simultaneous
+shell of tips, arriving and freezing together, and then the next shell.
+
+`TREE_JITTER` gives each branch its own start time on top of its depth. The delay
+**accumulates down the tree** rather than being drawn fresh per level, and that
+is the whole of it: drawn fresh, a child with a small delay under a parent with a
+large one begins before its parent has finished extending, which puts a branch in
+mid-air hanging off a tip that has not reached it yet. Accumulated, a child's
+start is its parent's completion plus its own wait, so detachment is impossible
+for exactly the reason it always was — there is nowhere for a detached thing to
+live.
+
+It costs growth rate: the average accumulated wait is ~0.31 levels per level, so
+`Colony.levels` and `startLevels` both went up by about a third to reach the same
+depth in the same time.
+
+#### The brightest thing in the form was a third of a pixel wide
+
+This form measured **0.00% of its pixels blown out** for months while looking, to
+everyone who looked at it, like it had bright tips. Two separate causes, both
+invisible by eye and both obvious the moment the histogram was asked:
+
+1. The tip light was gated on `core`, a geometric test against `w` — and `w` is
+   the cord's half-width scaled by `mix(0.26, 1, thicken)`. At a tip, where
+   `thicken` is zero *by definition*, a deep branch is 0.0007 field units across.
+   That is a third of a pixel. The highlight was real, correct, and never more
+   than a third-covered on any pixel it touched. It has its own radius with a
+   two-pixel floor now, and does not reuse `core`.
+
+2. The early-out `if (core <= 0 && near < 0.02) return 0;` ran *before the line
+   that lights the tip.* `near` is `h.dens`, which weights every branch by
+   `smoothstep(0, AGE_MID, age)` — so a brand new branch contributes almost
+   nothing to it, deliberately. A tip out ahead of the mat therefore failed both
+   halves of the test and returned black with `shade` left at 1.0. **The leading
+   tips, the only part of this form that was ever meant to be bright, were being
+   discarded for being too new.**
+
+One thing the metric still won't show, and it is a property of the palette rather
+than a defect: `blown` requires all three channels over 250, and the mycelial
+palettes are built with `a == b` so that `t = 0` is exactly black. Spore's
+amplitude is (0.42, 0.36, 0.26), so red clips at roughly half the drive blue
+needs. The brightest tip is (255, 242, 190) — a hot warm white with red fully
+clipped, which reads correctly and scores 0.00%. Compare peak channel values on
+this form, not `blown`.
+
+#### Zoom is a control, not a side effect
+
+The pullback was a **ratchet**. It was a side effect of tapping and `zoomPush`
+only ever increased, so around three taps in you hit the `TREE_LEVELS = 17` loop
+bound and every further tap shrank the colony without buying any growth at all.
+There was no path back.
+
+It is a two-way pinch now, clamped to `Colony.zoomIn … zoomOut`, and the tap is
+out of it entirely — one gesture, one job. Three things worth knowing:
+
+- **Growth stays monotone whatever the fingers do.** The cap reads
+  `max(zoomPush, 0)`, so zooming *out* buys levels and zooming back *in* does not
+  take them away. Un-growing a colony reads as the mat retracting, which nothing
+  living does — and it means zooming out and back in leaves you with a denser mat
+  than you started with, which is the right reward for having made room.
+- **Ground Me and pinch share two fingers, and grounding wins ties.** Two that
+  stay put ground; two that move apart or together zoom. The pinch has to travel
+  `pinchSlop` = 14% before it is recognised at all, and once grounding has
+  actually engaged the pinch cannot take it away — it can only claim fingers from
+  a rest that is still pending. Grounding is the gesture that must never be
+  missed.
+- **The pinch is anchored, not accumulated.** `beginZoom` snapshots where the
+  zoom was; `updateZoom` takes the gesture's absolute scale against that. Pinch
+  out and back the same amount and you are exactly where you began rather than
+  somewhere near it. The mapping is `-log2(scale)`, since `zoomPush` is in
+  octaves — which is what makes a pinch feel the same whether it starts from
+  close in or far out.
+
+**A dead end, if colony die-back ever comes up again.** It was built and pulled
+the same afternoon. Each colony ran its own life — grow, hold, fade, reseed
+elsewhere — off a free-running clock, which made growth genuinely endless and
+removed the need for any reset. Two bugs were found and fixed on the way (a dying
+colony kept *winning* the nearest-branch minimum while drawing nothing, so it
+punched holes through the healthy mat behind it; and thinning cords all the way
+out sent them through sub-pixel width, where a line does not fade, it samples,
+and breaks into a crawling dotted twinkle). Both fixes worked and it still went,
+because a mat that is always partly dissolving is a busier thing to look at than
+one that is simply there. It is in the history.
+
+#### Pinch to make room
+
+Pinching out shrinks everything on screen, and shrinking it is exactly what buys
+room for finer levels: an octave of pull-back is worth `ln2 / -ln(TREE_SHRINK)` =
+4.98 more of them. So the pinch gets you a smaller colony **and** somewhere new
+for it to grow, and it grows there over the next few seconds.
 
 The camera is otherwise completely still, and that stillness is half of why this
 form reads as growing now. The version before it cross-faded two octaves of mat
@@ -654,251 +835,464 @@ while everything behind them stays exactly where it is, and you cannot have both
 The feedback trail follows `pushDelta` and nothing else, so it is stationary at
 rest and locked to the camera during a pullback.
 
+#### Settled mat no longer dims, and that is a taste call
+
+`settle` faded material past about age 1.25 to 60% brightness and dropped a third
+of its fine hyphae, so the interior went quiet behind an advancing bright margin.
+It was justified as legibility — at one intensity everywhere the interior is
+dense enough to be hard to trace — and it was, but what it *looked* like is the
+middle of the colony dying while the edge lived. Which is a real thing mycelium
+does, and it is not the thing this form is for.
+
+`MAT_SETTLED_DIM` and `MAT_FINE_SETTLED` are now 1.00 and 0.60, which makes
+`settle` a no-op; the constants stay so the mechanic is one edit away rather than
+a rewrite. Near-black went 57% → 35% and the mat reads as one continuous
+organism. If the interior ever gets too dense to trace again, the legibility
+answer is fewer levels, not a dimmer middle.
+
+### The tunnel — cut 2026-08-07
+
+Everything below this heading described a form that is no longer in the app. It
+is kept, unedited, because four of the things learned building it are general and
+the next form will hit at least one of them:
+
+- **A surge has to be an integral, not a multiplier.** `travel` is a position, so
+  multiplying speed by something that rises and falls drags the picture backwards
+  every time it falls. Integrate the extra distance instead — monotone by
+  construction, and the surge you feel is its derivative.
+- **What makes a palette match itself is `a`, not `c`.** A neutral base with
+  differing channel frequencies reaches every hue on the wheel. Confining it is
+  the amplitude's job: a channel with a small `b` can never take the lead.
+- **Parallax is not pitch.** Pitch is how a family is wound, and so what it is
+  *seen as*. Rate is how fast it arrives, and so how far away it reads. One
+  shared rate makes the whole frame a single sheet of pattern being scrolled.
+- **Bright lines need something in the gaps.** The unsharpened field — the value
+  you were about to raise to a power anyway — is free and is exactly the right
+  shape.
+
+It was cut because Jacob cut it, not because it stopped working; it had just had
+its best round. The reasoning is the same one that retired the mycelial as a
+selectable form on the same day, and it is worth writing down plainly: **the
+forms that have worked in this project worked almost immediately.** Kaleidoscope
+has never drawn a complaint. Lobes landed on its first showing. The tunnel and
+the mycelial between them absorbed nearly every round ever spent here, and
+neither converged. Rounds spent are a signal, not an investment to protect.
+
+### The mycelial — retired as a form, kept as the home screen
+
+Same day, different fate. It is not in the picker any more and it is not a place
+you go; it is what grows in behind the Before screen while you sit there.
+
+That changed where it starts. A scatter through the middle grows *outward* from
+several centres, so the busiest part of the picture ends up exactly where the
+title and the cards are. Seeded around the **perimeter** facing inward, the frame
+fills from its margins and the middle is the last place to arrive — which is the
+right shape for something that has to sit behind type.
+
+- Perimeter position comes from walking the rectangle **by arc length**, so the
+  long sides get proportionally more spores than the short ones and a phone's
+  tall frame doesn't crowd them all onto the top and bottom. A golden-ratio step
+  means no two land on the same side.
+- The spores sit just *outside* the frame (`TREE_EDGE_OUT`), so germination
+  happens off-screen and what you see is hyphae arriving over the edge rather
+  than dots appearing on the border and sprouting.
+- Headings are inward plus a wide hashed spray. Dead-on inward gives you eleven
+  parallel columns marching at the frame.
+- `TREE_EDGE_W` is a **constant** 0.46 rather than the live aspect. Feeding it a
+  real aspect would slide every spore along the edge on a resize, and a
+  background that reshuffles itself on rotation is worse than one slightly off on
+  an iPad.
+- The clock is much slower than it was — about three minutes from bare edges to
+  meeting in the middle — and it belongs to *this visit* to the home screen. Go
+  into a session and come back and it starts over. That was the ask: "only when
+  you're on that home screen."
+- Opacity is applied by the view, not the shader. Sitting behind type is a
+  property of this screen; the form still has to render at full strength in Field
+  Lab, where it gets judged.
+
 ### The tunnel, and why it's the cheap one
 
-Work in `(log r, theta)` instead of `(x, y)` and two things become true. A
-logarithmic spiral turns into a straight line, so an ordinary square grid in
-that space comes back to the screen as a spiral corridor. And zooming turns into
-*translation*.
+Take `(log r, theta)` instead of `(x, y)` and two things become true. A
+logarithmic spiral turns into a straight line, so a plain sine in that space
+comes back to the screen as this vortex. And zooming turns into **translation**,
+which is the whole reason this form costs so little: the kaleidoscope and
+mycelial both pay double to cross-fade two octaves so their zoom can be endless,
+and this one needs none of it. It just scrolls, forever.
 
-That second one is the whole point. The kaleidoscope and mycelial both pay
-double — two octaves rendered and cross-faded — to make their zoom endless. The
-tunnel needs none of it. Beads just scroll out of an infinite integer grid,
-forever, and the distribution of bead sizes on screen never changes, so there's
-nothing to alias and nothing to hand off. It is by a distance the cheapest form
-in the app while looking like the most elaborate.
+#### What makes a palette match itself is `a`, not `c`
 
-Constraints that are structural rather than aesthetic:
+The tunnel palettes were near-neutral — Prism was a flat (0.5, 0.5, 0.5) — with
+the three channels on slightly different frequencies so the hue keeps travelling
+as `t` rises. A neutral base plus differing frequencies can reach **every** hue on
+the wheel, so the corridor came out magenta against gold against cyan and the
+arcs stopped reading as parts of one object.
 
-**`TUNNEL_COLUMNS` must be a whole number.** Theta wraps at the negative x-axis
-and the column coordinate jumps by exactly that value there. An integer jump
-lands back on the same point in the packing and nothing shows; anything else
-leaves a hard seam down that line. The shear is free to be fractional — it
-multiplies the row coordinate, which doesn't jump.
+The frequency spread is what makes the colour move and is worth keeping. What
+confines where it moves *to* is the amplitude: a channel with a small `b` can
+never take the lead however far the phase runs. So each palette is now one family
+with a low channel it cannot escape — Ember caps blue, Abyss caps red, Orchid
+caps green, Sap caps blue hardest of the four.
 
-**Per-bead colour has the same constraint, and it's easy to miss.** The hue is
-now a *hash* of the cell index — scattered marbles rather than concentric rings
-of one colour, which is closer to the reference and also stops the eye locking
-onto the rings and reading the whole thing as flat. But a hash of an index that
-jumps by `TUNNEL_COLUMNS` gives two different colours either side of a line the
-geometry crosses seamlessly. The index is folded back into `0..COLUMNS-1` first,
-and that fold is what makes a per-bead random colour legal here at all.
+One correction that cost a round: capping a channel is necessary but not
+sufficient. Where the two *large* channels both dip toward zero, the small one is
+all that is left, and a wide frequency spread guarantees that happens somewhere —
+Ember at a 0.32 spread had indigo arcs cutting through the fire. Tightening to
+0.18–0.20 keeps the channels in enough phase that the low one is never alone.
 
-**Nine candidate centres, not one.** A staggered lattice's cells are hexagons,
-and the rectangle you get from `floor()` is not that hexagon — near a corner of
-the rectangle the nearest bead centre belongs to the row above. Testing only the
-pixel's own rectangle clips every circle against the rectangle it fell in, and
-what comes out is a grid of rounded squares. That shipped in the first version
-of this and is what the second one fixes.
+#### Parallax and atmosphere
 
-**The beads are measured in real log-polar units.** Index space is neither square
-nor orthogonal — a column is `TAU/COLUMNS` wide while a row is `TUNNEL_ROW` tall,
-and the shear tilts the row axis on top — so a circle measured there squashes and
-leans with the twist. Undone (`e = (f.x - shear*f.y, f.y*aspect)`), the map to
-the screen is conformal, and a circle stays a circle at any shear and any radius.
+Two things the form had none of, both cheap, and between them the reason it reads
+as somewhere rather than as wallpaper.
 
-**`TUNNEL_BEAD` is not capped at half the neighbour distance**, and an earlier
-version of this section said it was. That was true of the code that tested only
-the pixel's own rectangular cell, where going over the cap fused rows of beads
-into columns. It stopped being true the moment the nine-way nearest-centre
-search went in, and the reason is worth keeping: **with nearest-site assignment,
-two overlapping discs meet along the perpendicular bisector between their
-centres rather than blending into a blob.** Overlap is a *flat contact* — which
-is what a jar of marbles under its own weight actually looks like. The useful
-range runs to about 0.577, the circumradius of the packing, where the last
-triple-point gaps close and there's no mortar left at all.
+**Parallax.** All three families shared one travel rate, so however differently
+they were wound the whole frame was a single sheet of pattern being scrolled and
+nothing on screen ever passed anything else. They have their own rates now
+(`TUNNEL_PAR_*`), slower reading as further off. The payoff is A against C: those
+are the two loop families whose overlap makes the flower-of-life, and at a shared
+rate that flower is a rigid stencil sliding by. At different rates it **opens and
+closes** as the two sets of arcs walk through each other.
 
-One split worth preserving: **hue dominates `t`, body shading goes in `detail`.**
-`t` is the palette coordinate, so anything that moves it moves colour. An early
-version gave the bead's dome enough weight in `t` that shading swept the hue
-across each bead, turning every one into its own small rainbow. The two
-highlights are the deliberate exception — they're tight enough to read as glints
-rather than as a gradient, and the fact that they move `t` by *different* amounts
-is exactly what makes them different colours, which is the one thing that says
-glass rather than painted plastic.
+Note this is not the pitch. Pitch decides how a family is wound and therefore
+what it is *seen as*; rate decides how fast it arrives and therefore how far away
+it reads. Flicker is the product, so it is worked out per family — A stays at
+0.80 Hz, C drops to 0.36, B's travel term is 0.09 on top of the 0.70 it gets from
+spin, and all of them roughly double at the surge crest.
 
-#### `shade`, and why lighting can't go through `t`
+**Atmosphere.** The form gave up faking depth with geometry and was then left
+with no depth cue at all, which is why an evenly lit frame read as flat however
+fast it scrolled. `TUNNEL_HAZE` falls light off toward the rim so everything
+converges on light at the centre. It is a *lighting* gradient rather than a
+shape, which is why it doesn't reintroduce what was abandoned, and it costs one
+exponential. Not applied to `core`, which sits at r = 0 where the falloff is 1.0
+anyway and which is the light everything is falling off towards.
 
-Forms return a palette coordinate. That is enough for almost everything, and it
-is *not* enough for a lit surface, which is worth understanding before adding
-another form that has one.
+The first pass at it was much too strong — haze 2.6 with a 0.22 floor took the
+frame from 23% near-black to 55% and killed every highlight. 1.9 with a 0.38
+floor, plus `TUNNEL_GLOW` from 2.6 to 3.9 to pay for it, keeps the corridor
+lit while the rim still falls away.
 
-`t` can only move a colour **along** the palette. Darkening a bead by scaling
-its `t` walks it toward zero — which these palettes do render as black, so the
-endpoint is right — but the trip there crosses most of the colour wheel, and
-every bead comes out a rainbow. That is the same failure the dome shading caused
-in the first version of this form, arrived at from a third direction.
+#### What it used to be, and why that was abandoned
 
-So `fieldFragment` takes a third output: `shade`, a straight brightness multiply
-applied after the palette and before the contrast curve. Forms that light
-nothing return 1. The tunnel uses it for real diffuse falloff with a real
-terminator, plus contact shading toward each bead's silhouette — a sphere is
-legible as a sphere because of where it goes **dark**, and nothing that only
-brightens can say that.
+For four rounds the tunnel was a hexagonal packing of glass beads in log-polar
+space — cylinder normals, a hot core, an emissive mortar band in the gaps — all
+of it trying to read as a corridor you were flying down.
 
-#### A wave that stretches instead of shears
+It never did, and the reason was structural rather than a tuning failure. A
+corridor reads as a corridor because of depth cues: atmospheric falloff, a size
+gradient, one continuous material with light travelling over it. A tile mosaic
+gives you none of those, so every round went into decorating the tiles — and the
+tiles were never the problem. The verdict, once it was finally looked at
+side-by-side with a measurement rather than by eye, was that **it was faking 3D
+on a flat screen and the flat screen was winning.**
 
-A rigid lattice being rotated reads exactly like a rigid lattice being rotated —
-marbles spinning, not a corridor flowing. Two mechanisms bend the log-polar
-coordinates *before* anything is tiled, so the whole packing waves rather than
-the beads being animated individually. They are not interchangeable.
+What survived the rewrite is the part that had always worked: travel into a
+centre with the colour changing as you go. What went is the pretence of depth.
+The form is now a flat pattern that admits it is one.
 
-**The lobes bend the angle**, and that shears. The warp is not conformal: its
-derivative with respect to the angle tilts the row axis, so a bead that is a
-circle in the warped coordinates comes back as an ellipse, and the stretch scales
-with `LOBE_R * LOBES`. At 0.085 with three lobes every bead was an egg. The
-useful amplitude is tiny, which is why the lobes could never be the wave.
+Two alternatives were built and rejected at the same time. Both are one-line
+reverts away in the history if they are ever wanted:
 
-**The travelling wave only moves the log-radius**, and its derivative is a pure
-stretch along the row axis: rows bunch up and spread apart as it passes and the
-beads keep the shape they had. Amplitude is therefore free in a way the lobes'
-never was, and `TUNNEL_WAVE_A * TUNNEL_WAVE_K` — the stretch, about a sixth — is
-the only thing bounding it. It runs at `RATE / K` = 0.31 log-radius per second
-against the beads' own 0.198, so it still overtakes them: the corridor flexes
-and the beads ride it, rather than the whole lattice sliding as one piece.
+- **Rings** — no angular term at all, so concentric ripples wobbled off-round by
+  two low harmonics. The cleanest of the three and the best tonal numbers (44%
+  near-black against the vortex's 24%), but it is a single idea and you have seen
+  all of it in ten seconds.
+- **Smoke** — the same spiral domain-warped by value noise sampled on the unit
+  circle. Genuinely good, but it is the `liquid light` form from the plan wearing
+  the tunnel's name. It should be its own form later rather than this one now.
 
-Once the wave was carrying the motion, every rotation rate came down by about
-half. What they had been adding was spin, and spin was the complaint.
+#### `shade`, and why structure can't go through `t`
 
-**`TUNNEL_LOBES` and `TUNNEL_WAVE_TILT` must both be whole numbers**, same rule
-as `TUNNEL_COLUMNS` and for the same reason — they multiply the raw angle, which
-jumps a full turn at the seam, and only an integer multiple survives that.
+**This is the single most repeated mistake in this file.** It has been made three
+times, in three different disguises, and each time it cost a debugging session:
 
-#### Cylinders, and why the highlight is a line
+1. a per-bead random hue hash
+2. per-bead dome shading, weighted into `t`
+3. the emissive mortar band, added to `t`
 
-`u`, the round silhouette coordinate, and the surface **normal** are two
-different questions, and answering them with the same value is what makes a
-packing read as marbles. A sphere's normal turns in both directions at once and
-its highlight is a dot. A cylinder's turns in one, its face stays flat along its
-length, and its highlight is a *line* down the axis — which is the whole visual
-signature of a polished rod.
+Every one produced the same symptom — a rainbow smeared across something that
+should have been one colour lit unevenly — and every one took a while to
+recognise, because the immediate appearance is "the colours look wrong" rather
+than "I put brightness in the wrong variable".
 
-`TUNNEL_CYL` is how much of the second. At 0.65 the surface bends mostly across
-the corridor, each bead carries one long straight glint running outward, and its
-radial ends stay flat and bright the way a cut rod's do. The silhouette, the rim,
-the contact shading and the anti-aliasing all still use `u`, because those are
-about the outline and the outline hasn't changed.
+The cause is always the same. `t` is a **palette coordinate**. It can only move a
+colour *along* the palette, and these palettes are IQ cosines, so they wrap:
+every large excursion in `t` is a trip round the colour wheel. Darkening
+something by scaling `t` walks it toward zero, which for the tunnel and mycelial
+palettes really is black — correct at the end, and a full rainbow on the way.
 
-`TUNNEL_SQUARE` closes the packing without moving any centres: a square of
-half-width 0.5 reaches 0.71 into its corners, so the triple-point gaps shrink and
-neighbours meet along longer flats. The metric has to be the same one the
-nine-way nearest-centre test uses, or the assignment and the silhouette disagree
-and beads get clipped against cells they don't belong to.
+`shade` is the answer. It is applied as `col *= shade` **after** the palette, so
+it is a straight brightness multiply that cannot move a hue anywhere. Zero is
+genuinely black; anything above one is genuinely overbright and is what the bloom
+pass exists to catch.
 
-#### The light changes, the beads don't
+The current tunnel is built so this mistake is not available:
 
-Two ways to make a bead look reflective: give it the **colour** of what's around
-it, or give it the **brightness** of what's around it. The colour route was tried
-twice and failed twice, and the reason is the same both times.
-
-`t` is a scalar into a cosine palette that runs about one full cycle over 0..1.
-Anything that sweeps a decent fraction of that range across a *single bead* puts
-a complete rainbow on every bead — which is exactly what the original per-bead
-hue hash was replaced to stop, arriving by a different route. It got there first
-through `TUNNEL_REFLECT` at 1.55, then through the two speculars at nearly a
-quarter of the ramp each.
-
-So the colour is purely **emitted** now — and it is painted on the corridor
-rather than sliding through it:
-
-```metal
-float lrTravel   = lrRoom - drift * TUNNEL_SPEED * TUNNEL_ROW;   // the beads' own speed
-float lightPhase = TAU * lrTravel * TUNNEL_SPIRAL_R + a * TUNNEL_SPIRAL_A;
-float spiral    = 0.5 + 0.5 * sin(lightPhase);
-float lightLift = 1.0 + TUNNEL_LIGHT * sin(lightPhase - 1.5708);
+```
+t     = hue, and nothing else       — a function of travel alone
+shade = the entire structure        — filaments, glow, vanishing point
 ```
 
-A function of position and time and **nothing else** — no hash, no cell index, no
-surface normal. Every bead in a ring shares a colour.
+There is no term in `tunnelField` that could accidentally add structure to `t`,
+because `t` is one function call with one argument. That is not tidiness for its
+own sake; it is the only version of this form that hasn't hit the wall.
 
-The travel term used to be the spiral's own, slightly slower than the beads', so
-the two slid against each other. That is a defensible thing for a light to do
-and it was the wrong thing here: two things drifting past each other at similar
-speeds reads as neither of them moving, only as churning. Locked to the beads,
-the colour is a property of the corridor — the walls are painted, and what
-changes the colour is that *you are travelling through it*. Everything on screen
-moves as one piece and the form finally has a direction. `lightLift` is the same wave a quarter turn ahead, carried on
-`shade`, so the leading edge of an arm is the bright part; that is what makes it
-read as a *light* rather than as a tint. It's built from `lrRoom`, the log-radius
-from before the wave and the lobes bent it, so the arm stays clean while the
-lattice flexes underneath it rather than pumping along with the rows.
-
-Safe as whole-field modulation because it **travels**: the bright part is always
-somewhere, just not here, so total screen luminance barely moves. Same argument
-as the mortar pulse.
-
-What makes the beads look polished is then brightness sliding across their faces,
-and that has now lived in three different places:
-
-- **In `t`.** A glint that moves the palette coordinate is a different *colour*,
-  not a brighter one. Every bead came out striped.
-- **In `shade`.** Which seems obviously right — `shade` is a raw multiply applied
-  after the palette, so it can't touch hue. But stacking four highlights into it
-  pushes pixels to three times white, and nothing downstream is built for that:
-  the contrast curve, the tonemap and the saturation lift all clip per channel at
-  different points, so what came out was hard-edged rainbow *spikes*. Worse than
-  the problem it fixed.
-- **In `detail`**, which is where they are. It mixes toward `palette(t + 0.18)`
-  at a weight that is clamped to 1. It lifts, it nudges the hue slightly, and it
-  cannot blow out — and that bound is the whole reason it's the right channel.
-
-`shade` still carries the diffuse term and the travelling light, and stays near 1.
+It also means the dark between the filaments needed no work at all. It is black
+because nothing is lighting it, not because a floor constant was tuned until it
+looked black.
 
 #### Keeping the vanishing point alive
 
-Beads shrink without limit toward the centre, and the first version gave up on
-them early: it faded the structure out below `r = 0.075` and left a flat disc.
-That is a ninth of the screen height rendered as one solid colour, sitting
-exactly where the depth cue should be — it read as a dead pixel, not as distance.
+Everything in this form is periodic in log-radius, so the closer to the centre a
+pixel sits, the more cycles fall inside it. Untreated, the middle of the frame is
+a boiling moiré — and it is far worse in motion than in a still, which is exactly
+how you fail to notice it while tuning against screenshots.
 
-The real problem was never the small beads, it was aliasing, and aliasing is
-fixed by knowing how big a pixel is rather than by deleting the detail. One
-pixel spans `pxSize/(r*ROW)` rows and `pxSize*COLUMNS/(TAU*r)` columns — both
-blow up as `1/r`, which is exactly the rate the beads shrink — so widening the
-bead's edge by that much makes each one soften into its own average precisely
-when it stops being resolvable. Structure now survives to within a few pixels of
-the centre and dissolves instead of aliasing.
+The first bead version gave up on this early: it faded structure out below
+`r = 0.075` and left a flat disc. That is a ninth of the screen height rendered
+as one solid colour, sitting precisely where the depth cue should be. It read as
+a dead pixel, not as distance.
+
+Aliasing is fixed by knowing how big a pixel is, not by deleting the detail.
+`tunnelResolve` compares the pattern's local frequency against the pixel size and
+fades the *sharpening* — not the pattern — toward its own mean. Structure now
+survives to within a few pixels of the centre and dissolves rather than aliases,
+and because it fades toward the mean rather than to a constant, the far distance
+goes smooth and **bright** instead of smooth and grey.
+
+The hue gets the same treatment through the `res` argument to `tunnelHue`, at a
+sixteenth of the frequency, so it only bites in the last few pixels. Those are
+the pixels everything converges on, and colour crawl there would be the most
+visible place it could possibly happen.
 
 `pxSize` is computed exactly rather than with `fwidth`: `p` is a linear function
 of `uv`, so one pixel is just `zoom / res.y`. That also sidesteps `fwidth` of
 anything built on `fract()` or `atan2`, which blows up on the one line where the
 input is discontinuous.
 
-The centre glow that replaces the disc is **kept deliberately small**, because
-the feedback pass amplifies it in a way nothing else here is subject to: this
-form's history is sampled slightly inward every frame, so whatever sits at the
-centre gets dragged outward across the whole screen and re-added. A glow that
-looks modest in a single frame comes back as pale fog over everything a few
-seconds later.
+The centre glow is **kept deliberately small**, and this constraint outlived the
+rewrite: this form's history is sampled slightly inward every frame, so whatever
+sits at the centre gets dragged outward across the whole screen and re-added. A
+glow that looks modest in a single frame comes back as pale fog over everything a
+few seconds later.
+
+#### The feedback contraction has to match the travel
+
+`fbContract` for this form is `exp(-TUNNEL_SPEED * dt)` — the history is
+contracted at exactly the rate the content moves outward, so the trail sits on
+the filaments instead of sliding against them.
+
+It read `exp(-TUNNEL_ROW * TUNNEL_SPEED * dt)` until the rewrite, because the
+bead version measured speed in *rows* and a row was `TUNNEL_ROW` of log-radius.
+The new form has no rows and `TUNNEL_SPEED` is already in the right units, so
+carrying the old expression across would have contracted the history at a third
+of the true rate. **That would not have looked like a bug.** It would have looked
+like the trail smearing slightly, which is a thing trails do.
+
+#### Making it rotate took four attempts and the first three were all one mistake
+
+"Make the rings rotate" sounds like a one-line change. It is. It is none of the
+three lines you reach for first, and all three fail for the same underlying
+reason, which took until the fourth attempt to see.
+
+**Attempt one: add a rotation term to the arms' phase.** Invisible. Rotating a
+logarithmic spiral is identical to scaling it — the same identity that makes this
+form cheap — so this is a change to the travel speed wearing a different name.
+The arithmetic below.
+
+**Attempt two: bend the space into rotating lobes.** This does rotate, and it is
+the wrong kind of rotation. Lobes rotate by *deforming*: the rings come out as
+rounded triangles that wobble round. The verdict was "they're kinda like
+distorting, not spinning" — a shape that changes as it turns reads as a
+distortion, and the eye credits the motion to the shape rather than to a turn.
+
+**Attempt three: light the rings unevenly and turn the light.** This is correct
+in principle and it was still barely legible. A two-arc brightness gradient is a
+very low spatial frequency, so it reads as the picture breathing rather than as
+anything spinning. The verdict was, again, "it's not spinning".
+
+##### What was actually wrong
+
+All three attempts assumed the question was *what moves*. It isn't. Every arm in
+the form was wound within 3° of every other one, and that alone decided that
+nothing could ever look like it was turning.
+
+> **A striped pattern can only be seen to move perpendicular to its own
+> stripes.** This is the aperture problem, and it is the same reason a rotating
+> barber pole looks like it moves upward.
+
+Both families were wound within 3° of each other — 67° and 70° from radial.
+Perpendicular to a nearly-tangential arm is *radial*, so every visible motion in
+the frame was resolved as zoom, no matter what the underlying maths was doing.
+The arms were in fact sweeping past at about 1 rad/s the whole time. It was never
+invisible; it was visible as the wrong thing.
+
+##### The fix: families wound differently
+
+Give the form a family that is nearly **radial** — `TUNNEL_ARMS_B` = 8 rays at
+`TUNNEL_PITCH_B` = 0.15, which is 7° off radial. Perpendicular to a nearly-radial
+ray is tangential, so the rays are seen to *turn*. Every family is driven by the
+same two clocks; what makes one look like spin and another like zoom is only how
+it is wound.
+
+This also un-breaks attempt one. The spiral/scaling degeneracy is **per family**:
+a family with pitch (k, m) has its phase advanced by `k·SPEED` from travel and by
+`m·SPIN/TAU` from rotation, so two families whose k/m differ are moved
+*differently* by the two, and spin becomes a real degree of freedom. A is 1.90/5,
+B is 0.15/8 — a ratio of sixty. `TUNNEL_SPIN` is applied to B only.
+
+#### Pitch has two jobs and they pull opposite ways
+
+```
+A   five arms,  TAU·1.90/5 = 2.39   67° from radial  ┐ close to each other
+C   three arms, TAU·1.35/3 = 2.83   70°              ┘
+B   eight rays, TAU·0.15/8 = 0.12    7°                far from both
+```
+
+**A and C have to be close.** Two arcs of near-equal curvature, offset from one
+another, overlap in lens shapes and read as **circles of the same size stacked on
+top of each other** — the flower-of-life look, and the thing this form is
+actually for. Three degrees apart does it.
+
+**B has to be far.** That is the rotation mechanism above, and it wants the
+biggest pitch gap the form can give it.
+
+So the loops carry the look and the rays carry the motion, and neither can do the
+other's job. One parameter, two requirements, in opposite directions.
+
+##### The round that cost: "rings" does not mean concentric
+
+Removing the 3-arm family when the rays went in drew "there isn't rings anymore",
+which was correct — half the loops had gone with it. The fix applied was to *also*
+drop A from five arms to two, on a reading of **rings** as *concentric*.
+
+That does produce concentric rings. It also destroys the overlap, because it
+widens the A–C pitch gap from 3° to 10°: the arcs stop looking like equal circles
+offset from one another and start looking like one curve crossing a different
+curve. The correction came back as "I liked when it was the circles stacked on top
+of each other like the flower of life kinda", which names the actual property —
+**equal size and offset**, not concentric.
+
+Zero arms is further along the same wrong axis and worse than either: true
+concentric circles plus radial rays is a wagon wheel, symmetric enough that the
+form stops looking like travel through anything at all.
+
+The general trap: *the word described the output, and two different structures
+could produce something answering to it.* The distinguishing property was never
+in the word. Worth one round to find out; should not cost a second.
+
+##### The weights are not one knob
+
+A at 1, C at **0.78**, B at 0.55, and the two secondary numbers want opposite
+things. C sits near parity because the overlap only reads when both arcs look
+like the same kind of thing — at 0.45 it became a bright curve with a faint one
+behind it, which is a different picture. B stays well under because the rays
+should be seen *crossing* the loops rather than competing with them; they came
+down from 0.85 and cost no rotation at all, since that comes from pitch, not from
+brightness.
+
+The general lesson, which is not the one attempt three wrote down: **when a form
+has a symmetry, and when every part of it is oriented the same way, motion along
+that direction is unreadable.** Breaking the symmetry with brightness is one
+answer and it is a weak one. Breaking it with *orientation* is much stronger,
+because orientation is what the visual system uses to resolve motion in the
+first place.
+
+One useful consequence for verifying any of this: travel dominates any still, so
+two frames two seconds apart tell you nothing. Probe `TUNNEL_SPEED` to zero with
+a Field Lab slider first. With travel frozen the arms sit in identical positions
+and the only thing that can move is the rotation — which is how the fourth
+attempt was confirmed and how the third was caught.
+
+#### A spiral cannot spin separately from moving — if there is only one of it
+
+**Rotating a logarithmic spiral is identical to scaling it.** That is exactly why
+this form is cheap — it is the same statement as "zoom is translation in
+log-polar space" — and it cuts the other way too. Add rotation to an arm's phase
+and every point of the arm slides along the arm's own path; the picture at any
+instant is unchanged, and all you have altered is the effective travel speed.
+
+Work out how fast a constant-phase arm sweeps at fixed radius and the point lands
+hard. Before any rotation term existed:
+
+```
+family 1:   0.42 × 1.90 × TAU/5  =  +0.80 rad/s
+family 2:  −0.42 × 1.35 × TAU/3  =  −1.19 rad/s
+```
+
+The arms were already counter-rotating at about a revolution every six seconds,
+purely from travelling outward. A first attempt added ±0.22 rad/s on top and was
+invisible, which is what you would expect from a 20% nudge to something already
+moving — and for one family it made it *slower*. It read as "nothing happened"
+rather than as "that was the wrong lever", which is how it survived being written
+down as a fix.
+
+The escape is in the qualifier. The degeneracy holds for *a* spiral, not for a
+field made of two of them at different pitches — see above. **When a motion is
+already implied by the geometry, adding more of it is a parameter change; making
+a second thing that responds to it differently is a new degree of freedom.**
+
+#### All the colour was in the middle of the frame
+
+`TUNNEL_HUE_K` was 0.30 and the form looked tame in a way that was hard to name.
+The cause is the log, and it is worth writing down because it applies to every
+quantity this form varies with radius.
+
+On a 402x874 frame the visible radius runs from about a pixel to about 2.2 — five
+and a bit units of log-radius. But the outer **four fifths of the screen area**
+live in the last one and a half of them. At 0.30 that is under half a colour
+cycle across almost the whole picture: one pale wash, with a small rainbow
+rosette buried in the few hundred pixels nearest the vanishing point. Every
+screenshot in the tuning history shows it and none of the numbers did.
+
+0.70 puts three or four bands across the frame with two of them out in the wide
+part. **Anything keyed to log-radius spends most of its range on a small
+fraction of the pixels** — check the outer part of the frame specifically, because
+that is where nearly all of them are.
 
 #### On `TUNNEL_SPEED` and what has *not* been verified
 
-Bright beads sweeping past dark mortar is periodic whole-field luminance
-modulation at one cycle per row, so the travel rate in rows per second is a
-flicker frequency in Hz. The photosensitive band starts around 3Hz. At 0.62
-rows/sec the form sits nearly five times clear of it.
+High-contrast filaments sweeping outward is periodic whole-field luminance
+modulation, so the rate at which a fixed screen point cycles bright-to-dark **is
+a flicker frequency in Hz**. It is each family's radial frequency times the
+travel speed:
 
-0.62 is the first number here with a measurement behind it. 0.30 was picked as
-obviously-safe with nothing to check it against, and it was too slow — at that
-rate the corridor drifts rather than travels, which is most of why the form read
-as marbles turning instead of as a ride. Fitting a similarity transform between
-successive frames of the reference clip puts it at 0.145–0.335 log-radius per
-second against our 0.096; dividing by `TUNNEL_ROW` gives 0.45–1.05 rows per
-second, and 0.62 is the middle of that. **The headroom was never the constraint.
-The absence of a number to aim at was.**
+```
+A:  1.90 × 0.42  =  0.80 Hz
+C:  1.35 × 0.42  =  0.57 Hz
+```
 
-The mortar glow added later is a second animated term and is safe for a
-different reason: it is a **travelling** wave, not a blink. `TUNNEL_GAP_WAVE`
-puts about 55 spatial cycles of it on screen at once, so the bright part is
-always somewhere — the spatial average barely moves and the whole-field
-modulation is negligible. At a *fixed* point the rate is `TUNNEL_GAP_DRIFT/TAU`
-= 0.09Hz anyway. The same swing applied globally instead of as a wave would be
-whole-field modulation, which is the one thing this shader must never do.
+The rays add a third term, and it is now the largest one:
 
-**That is a structural argument, not a measurement.** It rests on every animated
-term in `tunnelField` being slow: the row scroll at 0.30Hz, the twist sine at a
-180-second period, and the breath at 13 seconds. Nothing in the function
-oscillates faster. You can check that by reading it.
+```
+rays:  8 × 0.55 / TAU  =  0.70 Hz     (TUNNEL_ARMS_B × TUNNEL_SPIN / TAU)
+     + 0.15 × 0.42     =  0.06 Hz     (what family B picks up from travel)
+```
+
+**`TUNNEL_ARMS_B` and `TUNNEL_SPIN` are jointly a safety constant, and that is
+easy to miss because each one on its own reads as a taste knob.** Raising the ray
+count from 8 to 20 is a look decision. Raising the spin from 0.55 to 1.4 is a
+look decision. Together they are 4.5 Hz, which is inside the band. This is the
+same trap as `TUNNEL_SPEED` × radial frequency, one level less obvious, because
+the two numbers do not appear on the same line of the shader.
+
+The photosensitive band starts around 3Hz and is worst near 15, so there is a
+factor of four of headroom on the largest term. The way to spend it by accident
+is to raise two things that each looked fine because the pattern seemed too
+sparse. **Change one at a time and multiply them out.** It looks like a taste
+adjustment right up until you do the arithmetic.
+
+Every other animated term is slower still: the hue cycle at 0.13Hz, the breath at
+13 seconds. Nothing in the function oscillates faster. You can check that by
+reading it — which is the actual safety basis here, because the measurement
+below failed.
+
+One number worth knowing: fitting a similarity transform between successive
+frames of the reference clips put their travel at **0.145–0.335 log-radius per
+second**. The old bead form ran 0.198, inside that band. This one runs 0.42,
+which is about 25% above the top of it — a deliberate choice after "speed it up",
+not an oversight, but it is the one parameter here that is faster than anything
+that was ever measured. It is also the parameter you cannot judge from a
+screenshot, so judge it in Field Lab with the time scale at 1x.
 
 An attempt to measure the luminance trace directly **failed and was abandoned**,
 for two reasons worth recording so nobody repeats it:
@@ -910,9 +1304,63 @@ for two reasons worth recording so nobody repeats it:
   Nyquist that cannot see anything above ~1.4Hz, so **screenshot sampling can
   never test the 3–60Hz band at all**, however clean the run.
 
-Verifying this properly needs an in-app luminance probe writing to a log, or
-real device frame capture. Until someone does that, treat the safety basis as
-the code-reading argument above.
+Verifying this properly needs an in-app luminance probe writing to a log, or real
+device frame capture. Field Lab's `--capture` makes the first of those much
+easier than it was — it renders at a fixed timestep, so a sweep of `--at` values
+samples the luminance trace at whatever rate you like, with no Nyquist limit at
+all. Nobody has done it yet. Until someone does, treat the safety basis as the
+code-reading argument above.
+
+### Porting the eight-lobe field out of WebGL
+
+`lobes` came from a standalone WebGL page in `experiments/eight-lobe-tunnel`,
+and the port is worth writing down because almost none of the difficulty was in
+the geometry.
+
+The geometry transcribed nearly line for line. What did not, and could not, was
+the colour: that page computes RGB directly, runs its own three-stop ramp, and
+tone-maps with `1 - exp(-c)`. This app's contract is a palette **coordinate**
+plus a `shade` multiplier, with the palette living in `Form.swift` and a
+contrast curve and a bloom chain downstream. So the colour half is a rewrite and
+only the shape half is a transcription.
+
+Three things that cost time:
+
+**The whole frame was mid-tone.** First measurement was 89.8% near-black and
+0.00% above white. Raising the gain fixed near-black and did nothing at all for
+the top end — the frame just became a brighter grey. The reason is that the
+tunnel's `fil` is sharpened by a `pow` up to 7 before its glow cube sees it, so
+the cube only lifts the filament cores; bead light is not sharpened, and its halo
+is as broad as its core, so the same trick lifted everything equally. Keying the
+boost to `core` — about 1 inside a bead, 0 outside — is what separated them.
+
+**The palette made confetti.** The prototype's ramp is three analogous colours,
+so eight lobes span roughly a third of a colour wheel and read as one family.
+Mapping the lobe index straight onto `t` spans the *whole* wheel, and eight lobes
+a quarter-turn apart stop looking like one object. `LOBES_HUE_SPAN` narrows it
+back. This is a general hazard when lifting anything into this file: the app's
+palettes are full wheels, so any form that uses `t` as an index rather than as a
+gradient has to say how much of the wheel it wants.
+
+**The breath was the exposure knob, and it doesn't look like one.** Measured over
+six times, blown pixels ranged 0.38% to 6.79% — seventeenfold, against the
+tunnel's twofold. The suspect was the outward `pulse` crest; halving its
+amplitude changed the spread by *nothing*. The tell was in the sample times: the
+bright frames were about 13 seconds apart, which is `ambientCycleSeconds`, not
+the 6.6s of the pulse. `breathing` scales `tunnelR`, and `tunnelR` feeds two
+steep smoothsteps — bead radius and depth shade — so a 10% section pulse walks a
+large fraction of the beads across both thresholds at once. At 0.035 instead of
+the prototype's 0.105 the corridor still visibly opens and closes and the range
+collapses to sixfold.
+
+Final: 1.84% blown averaged over six times, range 0.58–3.13%, against reference
+footage at 1.5–2.2%.
+
+Near-black sits around 35%, well under the reference's 67.5%, and that is not
+being ignored — it is the same call the tunnel made at ~22%. Reference clips are
+mostly empty frame with one bright object; both of these forms fill the frame
+with structure by design. Blown percentage is the number that transfers between
+them, and near-black is not.
 
 ### One trap worth knowing
 
@@ -1024,8 +1472,8 @@ overdraw and no draw-call count to think about. Two levers, in order of size:
 linear, so barely half the fragments. The present pass still runs at full drawable
 size and upsamples with a linear sampler. This costs almost nothing here because
 none of these forms *have* detail at pixel scale by construction: mycelial's
-sheath is a soft falloff, the tunnel anti-aliases its beads to their own average
-as they approach a pixel across, and every form is then blended with a blurred
+sheath is a soft falloff, the tunnel fades its filaments toward their own mean as
+they approach a pixel across, and every form is then blended with a blurred
 copy of the previous frame at 26–66%. A 3x phone renders the field at an
 effective 2.2x and the feedback smears it anyway. **If a future form has hard
 sub-pixel structure, this is the first thing to put back.**

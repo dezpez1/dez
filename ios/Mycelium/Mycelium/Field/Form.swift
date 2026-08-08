@@ -25,17 +25,32 @@ struct Palette: Equatable, Sendable {
     var b: SIMD3<Float>
     var c: SIMD3<Float>
     var d: SIMD3<Float>
+
+    /// How much of a form's own hue spread this palette wants, as a multiplier.
+    ///
+    /// Only the lobes read it, and only because that form has two independent
+    /// things driving one `t`: the lobe index spreads colour across the frame,
+    /// and time carries the whole arrangement around the wheel. A palette alone
+    /// cannot tell those apart — `a`, `b`, `c` and `d` all scale both at once —
+    /// so "every lobe the same colour, and that colour cycling" is unreachable
+    /// without a knob that touches the index term and not the time term.
+    ///
+    /// Rides in `palA.w`, which was a padding zero. Every other palette leaves
+    /// this at 1 and behaves exactly as before.
+    var spread: Float = 1
 }
 
 enum Form: Int, CaseIterable, Identifiable, Sendable {
     case mycelial = 0
     case kaleidoscope = 1
-    case tunnel = 2
-    case weave = 3
+    case lobes = 3
     // Next up, per the plan: liquid light.
     //
-    // Two forms have been dropped rather than kept for completeness. Both are
-    // in the history if they're ever wanted back.
+    // The gap at 2 is deliberate. Raw values are what the shader switches on, so
+    // renumbering to close it would be churn for nothing.
+    //
+    // Three forms have been dropped rather than kept for completeness, and all
+    // three are in the history if they are ever wanted back.
     //
     // `smoke` was case 0 — two-level domain-warped fbm. The first form built
     // and the weakest: a wash with no structure, which read as washed-out no
@@ -44,8 +59,22 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
     // `lattice` was case 2 — two hexagonal grids at a small relative angle,
     // showing the moiré between them. Genuinely clever and pure geometry with
     // no noise anywhere, but it and the tunnel wanted the same slot: hard-edged
-    // synthetic structure in electric colour. The tunnel does more with it, so
+    // synthetic structure in electric colour. The tunnel did more with it, so
     // the lattice went.
+    //
+    // `tunnel` had case 2 after it — a log-polar vortex, and by the end the most
+    // worked-on thing in the file. Cut 2026-08-07, and not because it was
+    // broken. See the note at the top of its section in Field.metal for what is
+    // worth stealing out of it.
+
+    /// The forms you can actually choose.
+    ///
+    /// Mycelial is not among them, and that is the point rather than an
+    /// oversight: it is the home screen's *background* now, growing in from the
+    /// edges the whole time you sit there. It stays in this enum because the
+    /// shader still switches on it and Field Lab still has to be able to render
+    /// it — it just isn't a destination any more.
+    static let pickable: [Form] = [.kaleidoscope, .lobes]
 
     var id: Int { rawValue }
 
@@ -53,8 +82,7 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .mycelial:     return "Mycelial"
         case .kaleidoscope: return "Kaleidoscope"
-        case .tunnel:       return "Tunnel"
-        case .weave:        return "Weave"
+        case .lobes:        return "Lobes"
         }
     }
 
@@ -62,8 +90,7 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
         switch self {
         case .mycelial:     return "a colony, reaching"
         case .kaleidoscope: return "fractal, sixfold"
-        case .tunnel:       return "a corridor, spiralling"
-        case .weave:        return "one endless ribbon"
+        case .lobes:        return "eight ways deep"
         }
     }
 
@@ -90,57 +117,61 @@ enum Form: Int, CaseIterable, Identifiable, Sendable {
                         c: SIMD3(0.75, 0.85, 0.55), d: SIMD3(0.72, 0.90, 0.20)),
             ]
 
-        // The one form that earns a full spectrum. Every other form here is
-        // busy — a wide sweep on top of busy structure reads as noise, which is
-        // why the kaleidoscope's palettes are so restrained. The tunnel is the
-        // opposite: large, smooth, well-separated beads, each holding one
-        // colour, and it can carry a rainbow across them without any of it
-        // turning to mud.
+        // Wide and saturated. `t`
+        // here is the lobe index, so the palette is sampled at eight points
+        // spread evenly around it and nowhere in between. A narrow ramp would
+        // hand eight nearly identical colours to the eight lobes and throw away
+        // the one thing the form is built to show.
         //
-        // Built like the mycelial set so `t = 0` is exactly black (a == b,
-        // d = 0.5). That's not for empty space here — there isn't any — it's
-        // the floor of the mortar between beads. The gaps now carry a slow
-        // travelling glow rather than being dead black, and this is what makes
-        // that legible: the wave has somewhere genuinely dark to come up from,
-        // so it reads as light moving through the packing instead of as the
-        // whole surface changing brightness.
-        //
-        // The three channels are given slightly different frequencies rather
-        // than a shared one plus phase offsets. That's what makes the hue keep
-        // travelling as `t` rises instead of settling into two alternating
-        // colours.
-        case .tunnel:
+        // These do NOT need t = 0 to be black, and shouldn't be: the dark in
+        // this form is `shade` going to zero between
+        // the beads, and a palette that also darkens at one lobe would put a
+        // permanent dead wedge in the corridor. So a != b throughout, and the
+        // dimmest any lobe gets is a deep version of its own colour.
+        case .lobes:
             return [
-                Palette(name: "Prism",
+                Palette(name: "Pearl",
+                        a: SIMD3(0.52, 0.48, 0.56), b: SIMD3(0.44, 0.42, 0.48),
+                        c: SIMD3(1.00, 1.00, 1.00), d: SIMD3(0.00, 0.33, 0.67)),
+                Palette(name: "Aurora",
+                        a: SIMD3(0.44, 0.52, 0.54), b: SIMD3(0.40, 0.46, 0.42),
+                        c: SIMD3(1.00, 0.90, 1.10), d: SIMD3(0.15, 0.45, 0.75)),
+                Palette(name: "Ember",
+                        a: SIMD3(0.58, 0.44, 0.40), b: SIMD3(0.42, 0.34, 0.30),
+                        c: SIMD3(0.90, 1.00, 0.85), d: SIMD3(0.05, 0.25, 0.55)),
+                Palette(name: "Deep",
+                        a: SIMD3(0.40, 0.44, 0.60), b: SIMD3(0.34, 0.38, 0.46),
+                        c: SIMD3(1.05, 0.95, 0.80), d: SIMD3(0.60, 0.20, 0.40)),
+                // The odd one out, and it needs `spread` to exist at all.
+                //
+                // Every palette above hands the eight lobes eight neighbouring
+                // hues, so the frame is a colour *gradient* that drifts. This one
+                // collapses the spread to almost nothing, which puts every lobe
+                // on the same hue — and then the time term, which `spread` does
+                // not touch, walks that single hue around the entire wheel. Red,
+                // then orange, then yellow, one at a time, whole frame at once.
+                //
+                // Full amplitude with the three channels a third of a turn apart
+                // (d = 0, 1/3, 2/3) is the textbook IQ rainbow. It would be
+                // confetti at spread 1, which is exactly why LOBES_HUE_SPAN
+                // exists; at 0.05 it is the one arrangement the form otherwise
+                // could not make.
+                // `d` is (0, 2/3, 1/3) and NOT the textbook (0, 1/3, 2/3),
+                // which runs the wheel backwards: red → magenta → blue → cyan →
+                // green → yellow → red. On screen that reads as the spectrum in
+                // reverse — green sliding into yellow, yellow into orange,
+                // orange into red — which is the order things *cool* in, and it
+                // looks like the cycle is rewinding.
+                //
+                // Swapping the green and blue phases turns it around: red →
+                // orange → yellow → green → cyan → blue → violet → magenta →
+                // red. Same loop, same seam, travelled the other way, and the
+                // seam is the one place a colour wheel can close without a join
+                // you can see — magenta back into red.
+                Palette(name: "Rainbow",
                         a: SIMD3(0.50, 0.50, 0.50), b: SIMD3(0.50, 0.50, 0.50),
-                        c: SIMD3(0.80, 1.00, 1.25), d: SIMD3(0.50, 0.50, 0.50)),
-                Palette(name: "Neon",
-                        a: SIMD3(0.50, 0.30, 0.55), b: SIMD3(0.50, 0.30, 0.55),
-                        c: SIMD3(1.10, 0.85, 1.30), d: SIMD3(0.50, 0.50, 0.50)),
-                Palette(name: "Oilslick",
-                        a: SIMD3(0.38, 0.44, 0.52), b: SIMD3(0.38, 0.44, 0.52),
-                        c: SIMD3(1.45, 1.15, 0.90), d: SIMD3(0.50, 0.50, 0.50)),
-                Palette(name: "Vapor",
-                        a: SIMD3(0.52, 0.40, 0.48), b: SIMD3(0.52, 0.40, 0.48),
-                        c: SIMD3(0.65, 0.90, 1.05), d: SIMD3(0.50, 0.50, 0.50)),
-            ]
-
-        // Materials, not light. The weave reads as a made thing, so its
-        // palettes are dyes and metals rather than glows.
-        case .weave:
-            return [
-                Palette(name: "Rust",
-                        a: SIMD3(0.42, 0.26, 0.14), b: SIMD3(0.38, 0.28, 0.16),
-                        c: SIMD3(0.85, 0.75, 0.60), d: SIMD3(0.05, 0.15, 0.30)),
-                Palette(name: "Jade",
-                        a: SIMD3(0.20, 0.38, 0.32), b: SIMD3(0.24, 0.34, 0.30),
-                        c: SIMD3(0.80, 0.95, 0.70), d: SIMD3(0.20, 0.10, 0.35)),
-                Palette(name: "Ash",
-                        a: SIMD3(0.34, 0.36, 0.40), b: SIMD3(0.26, 0.26, 0.28),
-                        c: SIMD3(0.55, 0.55, 0.55), d: SIMD3(0.40, 0.44, 0.50)),
-                Palette(name: "Saffron",
-                        a: SIMD3(0.46, 0.34, 0.14), b: SIMD3(0.40, 0.32, 0.18),
-                        c: SIMD3(0.75, 0.65, 0.90), d: SIMD3(0.10, 0.20, 0.55)),
+                        c: SIMD3(1.00, 1.00, 1.00), d: SIMD3(0.00, 0.67, 0.33),
+                        spread: 0.05),
             ]
 
         // Built so that t = 0 is exactly black: a == b and d == 0.5 makes
