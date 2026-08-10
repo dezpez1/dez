@@ -65,13 +65,13 @@ CoreHaptics for the grounding pulse, and peer-to-peer sync with no server.)
 
 1. ~~**The Field, solo:**~~ **DONE** — Metal shader canvas, breathing ambient visual with palette seeds, touch → persistent blooms
 2. ~~**Ground Me:**~~ **DONE** — two-finger hold → dim/desaturate/slow + haptic breath pulse
-3. **Two-player sync:** MultipeerConnectivity + session codes; event-stream architecture with deterministic rendering
-4. **Capture:** hold-to-talk, local audio storage, timestamps on the event stream
+3. ~~**Two-player sync:**~~ **CUT** (Jacob, 2026-08-05: "I don't care about the two phone sync personally"). The event-log architecture it justified stays — replay is built on it
+4. ~~**Capture:**~~ **DONE** 2026-08-09 — hold-the-circle voice notes, per-session event log + recordings in the app container. Shipped alongside **audio reactivity** (not in the original plan): mic → band envelopes → the field moves with the music. See `ios/README.md` → Audio
 5. **Before screen:** intention + palette seeding
 6. **Morning View:** event-log replay, async transcription, Claude integration summary, gallery save
 7. Polish pass against the trip-UX rules (target sizes, motion tuning, no-text audit)
 
-Steps 1–2 are the first weekend demo. Steps 1–6 are the MVP.
+Steps 1–2 were the first weekend demo. Steps 1–6 minus 3 are the MVP.
 
 ## Verification
 

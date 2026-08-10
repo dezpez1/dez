@@ -108,7 +108,9 @@ rate. Nothing on that screen is a swatch or a mockup.
 | one finger, tap | one pulse of shape and color, everywhere at once |
 | one finger, press and rest | the field glows and dims in time, for as long as you stay put |
 | one finger, drag | nothing — moving is only what cancels the hold |
+| one finger, hold the circle | a voice note records while you hold, stops when you lift |
 | two fingers, press + hold | Ground Me (engages after 0.35s so a stray touch can't flip it) |
+| two fingers, pinch | zoom, both ways (mycelial only — the others have no camera) |
 | three fingers, tap | leave the session |
 
 Tap and rest are one gesture told apart by what happens after it lands, so
@@ -140,14 +142,14 @@ ringing, colors it through an
 the previous frame. That feedback blend is what makes a touch linger and get
 woven into the pattern rather than just switching off.
 
-**The field is a pure function of `(time, seed, bloom log)`.** Nothing about a
-session is stored in pixels. That's deliberate — it's what makes both remaining
-big features cheap:
-
-- **Sync (step 3):** send bloom events over MultipeerConnectivity, both devices
-  render identically. No pixel streaming, no server.
-- **Replay (step 6):** re-run the bloom log against the same seed and the
-  session reproduces exactly.
+**The field is a pure function of `(time, seed, bloom log, audio envelope)`.**
+Nothing about a session is stored in pixels. Sync was the original reason and
+sync is cut; the reason that remains is **replay (step 6)** — re-run the logs
+against the same seed and the session reproduces exactly. The audio envelope is
+the newest input and it obeys the same law: the mic's smoothed band levels are
+written to the session log at 10Hz precisely so a replay can re-integrate the
+drift they bought. An input that isn't logged is a session that can't be
+replayed.
 
 Don't break that property.
 
@@ -157,8 +159,10 @@ These are load-bearing, not stylistic:
 
 - **No strobe.** Every animated term is a slow sine or an exponential decay.
   There is no path through this shader that produces a hard flash.
-- **Soft-clamped luminance** in the present pass (`c / (1 + c * 0.55)`), so
+- **Soft-clamped luminance** in the present pass (`c / (1 + c * 0.50)`), so
   overlapping blooms brighten the field but can never blow out to white.
+  (This line used to say 0.55, which is the *tap* saturation constant — the
+  in-shader comment at the present pass was right all along.)
 - **Grounding never goes to black.** It desaturates toward a calm blue-grey and
   dims to 55%. Going fully dark mid-trip is its own kind of alarming.
 
@@ -212,6 +216,141 @@ inside the band but is one "make it faster" away from it — and the value carri
 nothing in its name to say so. 1.15 is the same journey with headroom, and it
 fixed something unrelated on the way: at 2.65 the beads crawled against the pixel
 grid near the rim, where the cells are only a few pixels apart.
+
+## Audio
+
+Two features share one microphone: the field moves with the music in the room,
+and holding the circle records a voice note. One `AVAudioEngine`, one input
+tap, two customers — [`Audio/AudioPipeline.swift`](Mycelium/Mycelium/Audio/AudioPipeline.swift)
+owns the session and the fan-out, [`Audio/AudioAnalyser.swift`](Mycelium/Mycelium/Audio/AudioAnalyser.swift)
+turns buffers into four floats, [`Session/CaptureRecorder.swift`](Mycelium/Mycelium/Session/CaptureRecorder.swift)
+turns them into an m4a when armed.
+
+**The mic is the only route.** iOS will not let an app tap another app's
+output, so there is no reading Spotify directly — the field hears the room the
+way you do. This works with a speaker regardless of whose phone is playing, and
+it is also why echo cancellation stays OFF: voice processing exists to remove
+what this phone's own speaker is playing, which is exactly the signal we want.
+
+```
+mic ─▶ ring buffer ─▶ Hann ─▶ 1024-pt FFT ─▶ bands ─▶ AGC ─▶ gate ─▶ envelope
+                                                     (15s)  (−55dB)  (taus below)
+      ─▶ 30Hz publish ─▶ state.audioLevel ─▶ u.audio ─▶ the seams
+      ─▶ 10Hz         ─▶ audio.jsonl (replay's copy)
+```
+
+### The smoothing is the safety story
+
+The photosensitivity waiver for this feature is on record, but the design
+doesn't lean on it. Every seam audio reaches modulates **phase, hue, or the
+amplitude of an existing slow oscillation — never `col`, never `shade`** — and
+the attack/release envelopes (`AudioDynamics`, FieldState.swift) keep the
+driving signal itself below the 3–60Hz band. A 130bpm kick is 2.2Hz; through a
+0.15s attack / 0.9s release follower it arrives as swell, not strobe. The old
+argument for this shader was "read it — nothing oscillates fast"; the mic is
+the first input whose frequency content can't be read off the page, so the
+smoothing stage is what keeps that argument true.
+
+| channel | attack τ | release τ | reaches |
+|---|---|---|---|
+| bass (x) | 0.15s | 0.9s | mycelial churn |
+| mid (y) | 0.25s | 1.2s | drift rate, breath amplitude, kaleido hue |
+| treble (z) | 0.12s | 0.7s | nothing yet — computed and logged |
+| onset (w) | 0.05s | 0.35s | nothing yet — computed and logged |
+
+Per-band AGC (peak follower, ~15s release) means a quiet speaker and a loud
+party both land in 0…1 without a knob; the −55dBFS gate is what stops the AGC
+from dutifully normalising mic hiss into a strobing empty room.
+
+### The seams, and the multiply that would have been a lurch
+
+| seam | what | constant |
+|---|---|---|
+| drift | lobes + mycelial read `drift + u.audio.w` | `AudioDynamics.driftRate` 0.8 |
+| breath | scale-pulse amplitude `* (1 + AUDIO_BREATH * mid)` | `AUDIO_BREATH` 0.5 |
+| churn | mycelial's Worley phase `+ bass * AUDIO_CHURN` | `AUDIO_CHURN` 0.8 |
+| hue | kaleidoscope only: `t += AUDIO_HUE * mid` | `AUDIO_HUE` 0.05 |
+
+The obvious drift seam — `drift * (1 + envelope)` — is a trap, and it is the
+tunnel's surge lesson pointing the other way. `drift` is absolute time wearing
+a grounding factor; multiplying it by an envelope moves **position**, not
+speed, and ten minutes in, a 5% envelope dip is a thirty-drift-second lurch
+backwards. So Swift integrates `audioDriftTime += dt * rate(audio)` where
+there is a dt to integrate with, and the shader only ever adds. An integral
+cannot jump.
+
+The kaleidoscope keeps plain `drift`, deliberately: its feedback contraction
+assumes `KALEIDO_ZOOM_RATE` against a constant clock, and a trail contracted at
+yesterday's speed under a zoom running at today's is the difference between
+motion and smear. It hears the music through hue instead.
+
+Measured (seed 42): audio at zero is **bit-identical** to the pre-audio shader
+on all three forms; `--audio pulse:0.5` holds near-black and blown inside the
+form's own no-audio swing band; `const:1,1,1` at t=60 lands the palette further
+round the wheel with no discontinuity.
+
+### Capture
+
+A ~110pt disc at bottom centre, drawn by SwiftUI, hit-tested in
+`MetalFieldView`'s own touch pipeline — **not** an overlay button, because a
+button swallows touches and a swallowed touch is one the grounding counter
+never saw. A capture press still counts toward the two- and three-finger
+totals, so grounding stays reachable and the exit works with a thumb on the
+circle. `CaptureZone` is one definition shared by the hit test and the glyph,
+so they cannot drift apart.
+
+Its rules: hold to record, lift to keep. No drag-to-cancel — a cancel gesture
+is a precision gesture. **Nothing discards a recording** — not a three-finger
+exit, not a phone call, not touch cancellation — except a grazed circle
+released inside 0.5s, and even that leaves a `captureDiscard` line in the log.
+Grounding during capture grounds normally; the haptic pulse is faintly audible
+in the note, and that is accepted. AAC mono 64kbps (~0.5MB/min), CAF fallback
+if the encoder refuses the hardware format.
+
+### The session record
+
+Entering a session now builds a **fresh FieldState — new seed, clock at
+zero** — where re-entry used to resume the old clock. The log is why: a
+timestamp only means something against a clock that started when the session
+did.
+
+```
+Documents/sessions/20260809-102228-s4.5/     (app container, never the repo)
+    session.json     {"startedAt": …, "seed": …, "form": …, "paletteIndex": …}
+    events.jsonl     bloom / captureStart / captureEnd / captureDiscard /
+                     ground / end — one JSON object per line, t in elapsed s
+    audio.jsonl      the envelope at ~10Hz ({"t","b","m","tr","o"})
+    note-001-t0083.m4a
+```
+
+JSONL through `FileHandle` appends, never a rewritten document — append-only is
+crash-honest, and a session that dies at minute forty keeps forty minutes. The
+`startedAt` in the header is the only wall-clock date anywhere in the app; the
+field itself never learns what day it is. Known gap: pinch/zoom events are not
+logged, so a mycelial replay's growth cap can drift from its session — scoped
+out with the Morning View.
+
+### The audio session, and the constants that are really decisions
+
+Configured once at session entry, never reconfigured mid-session (reconfiguring
+a live session is the classic way to stall `CHHapticEngine`, and grounding
+haptics during a capture is the design working, not an edge case):
+
+- `.playAndRecord` + `.mixWithOthers` — a plain `.record` category **pauses
+  Spotify**. The music this feature exists to hear is usually on this phone.
+- `.allowBluetoothA2DP` — without it a record-capable session drags a Bluetooth
+  speaker down to the HFP phone-call codec. With it, output stays A2DP, input
+  stays the built-in mic.
+- Permission is asked on the **home screen**, sober, never mid-session. Denied
+  means the field doesn't react and the circle never appears — the session is
+  exactly the app that shipped before this feature.
+- The engine runs only during sessions: the mic indicator is lit for a whole
+  session (inherent, not a bug) and provably off at home.
+- Sessions accumulate recordings with no deletion UI yet — the Morning View's
+  problem, noted here so it isn't rediscovered as a surprise.
+
+Interruptions (calls, Siri) finalize-and-keep any live recording and restart
+the engine when the system hands the mic back.
 
 ## Field Lab
 
@@ -1520,5 +1659,11 @@ at 30fps is fine, but it is the number to watch if the picker ever grows.
 
 ## Not built yet
 
-Steps 3–7: sync, voice capture, the intention screen, the Morning View, and the
-polish pass. See [the plan](../docs/PLAN.md).
+Steps 5–7: the intention screen, the Morning View, and the polish pass. Sync
+(step 3) is cut; capture (step 4) shipped 2026-08-09 alongside audio
+reactivity. See [the plan](../docs/PLAN.md).
+
+The Morning View's inputs are already on disk: every session leaves
+`session.json`, `events.jsonl`, `audio.jsonl` and its recordings in the app
+container (see the Audio section). What's missing is the screen that replays
+them.
