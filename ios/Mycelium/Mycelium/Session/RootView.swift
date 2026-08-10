@@ -167,6 +167,7 @@ private struct PreviewTile: View {
 
 struct RootView: View {
     @State private var session = FieldState()
+    @State private var log: SessionLog?
     @State private var inSession = false
 
     /// Each form remembers the palette you last left it on. Indices, because
@@ -174,11 +175,48 @@ struct RootView: View {
     @State private var palettes: [Form: Int] = Dictionary(
         uniqueKeysWithValues: Form.allCases.map { ($0, 0) })
 
+    /// A session is an EVENT now, not a screen: entering builds a fresh
+    /// FieldState — new seed, clock at zero — opens the log, and starts the
+    /// mic. That is a behavior change from the old single long-lived state
+    /// (re-entering used to resume the old clock), and the log is why: a
+    /// timestamp only means something against a clock that started when the
+    /// session did. It also matches what the home growth already does —
+    /// every visit starts over.
+    private func enter(form: Form, paletteIndex: Int) {
+        let s = FieldState()
+        s.form = form
+        s.paletteIndex = paletteIndex
+
+        let log = SessionLog(seed: s.seed, form: form, paletteIndex: paletteIndex)
+        // Blooms carry their own birth time; grounding needs the clock read
+        // at the moment it flips — `s` captured weakly, since the state owns
+        // that closure and a strong capture would be a cycle.
+        s.onBloom = { b in log?.bloom(b) }
+        s.onGround = { [weak s] on in log?.grounding(t: s?.elapsed ?? 0, on: on) }
+
+        session = s
+        self.log = log
+        AudioPipeline.shared.beginSession(feeding: s, log: log)
+        withAnimation(.easeInOut(duration: 0.65)) { inSession = true }
+    }
+
+    /// Ordering matters: the pipeline finalizes any live capture (which logs
+    /// its end) before the log writes its own end line and closes.
+    private func leave() {
+        AudioPipeline.shared.endSession()
+        log?.end(t: session.elapsed)
+        log = nil
+        inSession = false
+    }
+
     var body: some View {
         Group {
             if inSession {
-                FieldScreen(state: session) { inSession = false }
-                    .transition(.opacity)
+                FieldScreen(state: session,
+                            captureEnabled: AudioPipeline.shared.permission == .granted) {
+                    leave()
+                }
+                .transition(.opacity)
             } else {
                 entry
             }
@@ -192,24 +230,31 @@ struct RootView: View {
         //   xcrun simctl launch <udid> com.dez.mycelium -form kaleidoscope -field reef
         //   xcrun simctl launch <udid> com.dez.mycelium -form mycelial -field spore -blooms
         //   xcrun simctl launch <udid> com.dez.mycelium -field ember -ground
+        //   xcrun simctl launch <udid> com.dez.mycelium -field pearl -capture 8,5
+        //   xcrun simctl launch <udid> com.dez.mycelium -field pearl -audiofake sine
         .onAppear {
             let args = ProcessInfo.processInfo.arguments
 
+            var form = session.form
             if let i = args.firstIndex(of: "-form"), i + 1 < args.count,
                let f = Form.allCases.first(where: {
                    $0.title.lowercased() == args[i + 1].lowercased()
                }) {
-                session.form = f
+                form = f
             }
 
             guard let i = args.firstIndex(of: "-field") else { return }
+            var palette = 0
             if i + 1 < args.count,
-               let p = session.form.palettes.firstIndex(where: {
+               let p = form.palettes.firstIndex(where: {
                    $0.name.lowercased() == args[i + 1].lowercased()
                }) {
-                session.paletteIndex = p
+                palette = p
             }
-            inSession = true
+
+            // Through the real entry path, so a headless session gets the
+            // same log, mic pipeline and capture wiring a fingered one does.
+            enter(form: form, paletteIndex: palette)
 
             // A headless simulator can't rest a finger on the glass either.
             if args.contains("-hold") {
@@ -246,6 +291,52 @@ struct RootView: View {
                                    (0.24, -0.30),
                                    (0.05, 0.62)] {
                         session.addBloom(x: x, y: y, strength: 1.0)
+                    }
+                }
+            }
+
+            // -capture 8,5 — press the circle at 8s, lift at 13s, through the
+            // real controller, so the file-and-log path runs headlessly.
+            if let ci = args.firstIndex(of: "-capture"), ci + 1 < args.count {
+                let parts = args[ci + 1].split(separator: ",").compactMap { Float($0) }
+                let start = Double(parts.first ?? 8)
+                let dur = Double(parts.count > 1 ? parts[1] : 5)
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(start))
+                    AudioPipeline.shared.beginCapture()
+                    try? await Task.sleep(for: .seconds(dur))
+                    AudioPipeline.shared.endCapture()
+                }
+            }
+
+            // -audiofake [sine|pulse] — drive audioLevel synthetically, for
+            // eyeballing the uniform path with no microphone at all. It
+            // writes over whatever the pipeline publishes, so use it on a
+            // simulator that has NOT been granted the mic.
+            if let ai = args.firstIndex(of: "-audiofake") {
+                let kind = ai + 1 < args.count ? args[ai + 1] : "sine"
+                let s = session
+                Task { @MainActor in
+                    var env = AudioEnvelope()
+                    let started = CACurrentMediaTime()
+                    var last = started
+                    while true {
+                        try? await Task.sleep(for: .milliseconds(33))
+                        let now = CACurrentMediaTime()
+                        let t = Float(now - started)
+                        let dt = Float(now - last)
+                        last = now
+                        let target: SIMD4<Float>
+                        if kind == "pulse" {
+                            let ph = (t * 0.5).truncatingRemainder(dividingBy: 1)
+                            let on: Float = ph < 0.25 ? 1 : 0
+                            target = SIMD4(on, on, on, on)
+                        } else {
+                            let w = 0.5 + 0.5 * sin(2 * Float.pi * 0.2 * t)
+                            target = SIMD4(w, w, w, 0)
+                        }
+                        env.advance(toward: target, dt: dt)
+                        s.audioLevel = env.value
                     }
                 }
             }
@@ -290,11 +381,8 @@ struct RootView: View {
                                 get: { palettes[form] ?? 0 },
                                 set: { palettes[form] = $0 })
                         ) {
-                            session.form = form
-                            session.paletteIndex = palettes[form] ?? 0
-                            withAnimation(.easeInOut(duration: 0.65)) {
-                                inSession = true
-                            }
+                            enter(form: form,
+                                  paletteIndex: palettes[form] ?? 0)
                         }
                     }
                 }
@@ -306,6 +394,7 @@ struct RootView: View {
                 VStack(spacing: 6) {
                     legend("tap", "pulse")
                     legend("press and rest", "glow and dim")
+                    legend("hold the circle", "capture")
                     legend("two fingers, hold", "ground me")
                     legend("two fingers, pinch", "zoom")
                     legend("three fingers", "leave")
@@ -315,6 +404,10 @@ struct RootView: View {
             }
         }
         .statusBarHidden()
+        // The one moment the app asks for anything: sober, on this screen,
+        // never mid-session. A denial is honored silently — the field just
+        // doesn't react to the room and the circle never appears.
+        .onAppear { AudioPipeline.shared.requestPermissionIfNeeded() }
     }
 
     private func legend(_ gesture: String, _ effect: String) -> some View {

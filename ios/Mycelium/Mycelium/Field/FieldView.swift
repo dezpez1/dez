@@ -12,6 +12,9 @@
 //    1 finger   press + rest → the field glows and dims in time, for as long
 //                              as you stay put
 //    1 finger   drag         → nothing; moving is only what cancels the hold
+//    1 finger   hold the circle → a voice note records while you hold, stops
+//                              when you lift. The circle is the ONE place on
+//                              screen a touch means something different
 //    2 fingers  press + hold → Ground Me (engages after a short delay so a
 //                              stray two-finger touch can't flip it)
 //    2 fingers  pinch        → zoom, both ways. Mycelial only; the other forms
@@ -29,9 +32,47 @@
 //  pinch has to travel PINCH_SLOP before it is recognised at all, and once
 //  grounding has engaged the pinch cannot take it away.
 //
+//  The capture circle is drawn by SwiftUI but hit-tested HERE, in the same
+//  touch pipeline as everything else, and that is a load-bearing choice: an
+//  overlay button would swallow its touches, and a swallowed touch is one the
+//  grounding counter never saw. This way a capture press still counts toward
+//  the two-finger and three-finger totals — grounding stays reachable and the
+//  exit still works with a thumb resting on the circle.
+//
+//  Capture's own rules: no drag-to-cancel (a cancel gesture is a precision
+//  gesture), and nothing ever discards a recording except a grazed circle
+//  released inside half a second. A second finger landing during capture
+//  grounds normally — the haptic pulse will be faintly audible in the note,
+//  and that is accepted; grounding does not wait for anything.
+//
 
 import SwiftUI
 import MetalKit
+
+// MARK: - The capture circle's geometry
+
+/// One definition, used by both the UIKit hit test and the SwiftUI glyph, so
+/// the place you press and the place you see cannot drift apart.
+///
+/// The hit disc is bigger than the drawing — 110pt of target around 84pt of
+/// glyph — because the hand aiming at it is not steady, and a miss that
+/// blooms the field instead of recording a thought is the worse failure.
+enum CaptureZone {
+    static let hitRadius: CGFloat = 55
+    static let glyphDiameter: CGFloat = 84
+    /// Centre height above the bottom edge — clear of the home indicator,
+    /// low enough to be where a resting thumb already is.
+    static let bottomInset: CGFloat = 96
+
+    static func center(in bounds: CGRect) -> CGPoint {
+        CGPoint(x: bounds.midX, y: bounds.maxY - bottomInset)
+    }
+
+    static func contains(_ p: CGPoint, in bounds: CGRect) -> Bool {
+        let c = center(in: bounds)
+        return hypot(p.x - c.x, p.y - c.y) <= hitRadius
+    }
+}
 
 // MARK: - Touch-handling MTKView
 
@@ -39,6 +80,17 @@ final class MetalFieldView: MTKView {
 
     var state: FieldState?
     var onExit: (() -> Void)?
+
+    /// Capture: set by the representable. Disabled means the circle does not
+    /// exist — no glyph, no zone, every touch is field.
+    var captureEnabled = false
+    var onCaptureStart: (() -> Void)?
+    var onCaptureEnd: (() -> Void)?
+
+    /// The one touch that is currently a recording, if any. Identity, not a
+    /// count — a second finger joining does not end it, and only THIS touch
+    /// lifting does.
+    private var captureTouch: UITouch?
 
     private var groundingWorkItem: DispatchWorkItem?
     private static let groundingHoldDelay: TimeInterval = 0.35
@@ -175,6 +227,7 @@ final class MetalFieldView: MTKView {
             state?.setGrounding(false)
             cancelHold()
             endPinch()
+            endCapture()   // finalize and KEEP — leaving mid-thought loses nothing
             Haptics.shared.stopGroundingPulse()
             onExit?()
             return
@@ -189,6 +242,14 @@ final class MetalFieldView: MTKView {
 
         if active == 1, let t = touches.first {
             let p = t.location(in: self)
+            // The circle first: a press inside it is a recording, not a tap —
+            // it must neither bloom nor arm the hold, or every voice note
+            // would open with a flash and end with the field pulsing.
+            if captureEnabled, CaptureZone.contains(p, in: bounds) {
+                captureTouch = t
+                onCaptureStart?()
+                return
+            }
             // The pulse lands on contact. Waiting for the gesture to be
             // classified first would make every tap feel late.
             addTap(at: p, strength: 1.0)
@@ -197,6 +258,14 @@ final class MetalFieldView: MTKView {
             // A second finger means grounding, not holding.
             cancelHold()
         }
+    }
+
+    /// Finalize the recording if one is running. Keep is the only outcome —
+    /// see the header. Called from every path a capture can end on.
+    private func endCapture() {
+        guard captureTouch != nil else { return }
+        captureTouch = nil
+        onCaptureEnd?()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -248,6 +317,12 @@ final class MetalFieldView: MTKView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // Identity check, not a count: only the capture finger lifting ends
+        // the recording. The OTHER finger of a ground leaving must not.
+        if let ct = captureTouch, touches.contains(ct) {
+            endCapture()
+        }
+
         let remaining = event?.allTouches?.filter {
             $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
@@ -260,6 +335,7 @@ final class MetalFieldView: MTKView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        endCapture()   // cancellation keeps the audio too — see the header
         endPinch()
         updateGrounding(activeTouches: 0)
         cancelHold()
@@ -270,6 +346,7 @@ final class MetalFieldView: MTKView {
 
 struct FieldViewRepresentable: UIViewRepresentable {
     let state: FieldState
+    var captureEnabled = false
     let onExit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -282,6 +359,11 @@ struct FieldViewRepresentable: UIViewRepresentable {
         let view = MetalFieldView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.state = state
         view.onExit = onExit
+        view.captureEnabled = captureEnabled
+        // The pipeline owns everything downstream of the gesture — file, log,
+        // glyph state. The view only knows the circle went down and came up.
+        view.onCaptureStart = { AudioPipeline.shared.beginCapture() }
+        view.onCaptureEnd = { AudioPipeline.shared.endCapture() }
         view.backgroundColor = .black
 
         if let renderer = FieldRenderer(view: view, state: state) {
@@ -294,6 +376,46 @@ struct FieldViewRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: MetalFieldView, context: Context) {
         uiView.state = state
         uiView.onExit = onExit
+        uiView.captureEnabled = captureEnabled
+    }
+}
+
+// MARK: - The capture glyph
+
+/// The visible half of the circle. Purely visual — `allowsHitTesting(false)`
+/// at the call site, because the actual press is handled by MetalFieldView's
+/// zone test (see the header for why that split is load-bearing).
+///
+/// Idle it is barely there: a hairline ring with a breath of fill, present
+/// enough to find, dim enough to not compete with the field. Recording, it
+/// brightens and swells on the hold-pulse rhythm — the same 2.2s the field
+/// itself answers a resting finger with, so it reads as the field listening
+/// rather than as an indicator light.
+private struct CaptureGlyph: View {
+    let state: FieldState
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { ctx in
+            let recording = state.isCapturing
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            let swell = recording
+                ? 1.0 + 0.05 * sin(t * 2 * .pi / Double(Breath.holdPulseSeconds))
+                : 1.0
+
+            Circle()
+                .strokeBorder(.white.opacity(recording ? 0.45 : 0.15),
+                              lineWidth: 1)
+                .background(
+                    Circle().fill(RadialGradient(
+                        colors: [.white.opacity(recording ? 0.20 : 0.05), .clear],
+                        center: .center, startRadius: 0,
+                        endRadius: CaptureZone.glyphDiameter / 2))
+                )
+                .frame(width: CaptureZone.glyphDiameter,
+                       height: CaptureZone.glyphDiameter)
+                .scaleEffect(swell)
+                .animation(.easeInOut(duration: 0.4), value: recording)
+        }
     }
 }
 
@@ -301,18 +423,34 @@ struct FieldViewRepresentable: UIViewRepresentable {
 
 struct FieldScreen: View {
     let state: FieldState
+    var captureEnabled = false
     let onExit: () -> Void
 
     var body: some View {
-        FieldViewRepresentable(state: state, onExit: onExit)
-            .ignoresSafeArea()
-            .statusBarHidden()
-            .persistentSystemOverlays(.hidden)
-            .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
-            .onDisappear {
-                UIApplication.shared.isIdleTimerDisabled = false
-                Haptics.shared.stopGroundingPulse()
+        ZStack {
+            FieldViewRepresentable(state: state,
+                                   captureEnabled: captureEnabled,
+                                   onExit: onExit)
+            if captureEnabled {
+                // Positioned by the same CaptureZone the hit test uses. Both
+                // views fill the screen edge to edge, so the coordinate
+                // spaces agree by construction.
+                GeometryReader { geo in
+                    CaptureGlyph(state: state)
+                        .position(CaptureZone.center(
+                            in: CGRect(origin: .zero, size: geo.size)))
+                }
+                .allowsHitTesting(false)
             }
+        }
+        .ignoresSafeArea()
+        .statusBarHidden()
+        .persistentSystemOverlays(.hidden)
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+            Haptics.shared.stopGroundingPulse()
+        }
     }
 }
 
