@@ -284,7 +284,12 @@ final class FieldRenderer: NSObject, MTKViewDelegate {
                 palA: SIMD4<Float>(pal.a.x, pal.a.y, pal.a.z, pal.spread),
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),
-                palD: SIMD4<Float>(pal.d.x, pal.d.y, pal.d.z, 0))
+                palD: SIMD4<Float>(pal.d.x, pal.d.y, pal.d.z, 0),
+                // Explicit rather than defaulted, so this fill reads side by
+                // side with LabRenderer's and the Metal struct. Zero for every
+                // state nothing feeds — tiles, home growth, denied mic.
+                audio: SIMD4(state.audioLevel.x, state.audioLevel.y,
+                             state.audioLevel.z, state.audioDriftTime))
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
 
             // Always send a full-size array so the shader's bounded loop reads

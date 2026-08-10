@@ -44,4 +44,21 @@ struct Uniforms {
     /// with that term at zero on a phone, which is the kind of bug that gets
     /// found on a real device at the worst possible moment.
     var lab: SIMD4<Float> = .zero
+
+    /// What the room sounds like, and how far the music has carried the field.
+    ///
+    /// x/y/z are smoothed 0…1 band envelopes (bass, mid, treble) from the mic
+    /// analyser — already attack/release-filtered on the way in (see
+    /// `AudioDynamics`), so nothing downstream needs to smooth them again.
+    ///
+    /// w is `FieldState.audioDriftTime`: drift-seconds of extra colour/morph
+    /// travel, INTEGRATED on the Swift side. A rate cannot be applied to
+    /// absolute time multiplicatively — `drift * envelope` moves *position*,
+    /// not speed, and at t=600s a 5% envelope dip is a 30-drift-second lurch —
+    /// so the travel accumulates where there is a dt to accumulate with, and
+    /// the shader only ever adds it.
+    ///
+    /// Zero whenever nothing is listening: permission denied, preview tiles,
+    /// the home-screen growth. Zero must render exactly the audio-less frame.
+    var audio: SIMD4<Float> = .zero
 }

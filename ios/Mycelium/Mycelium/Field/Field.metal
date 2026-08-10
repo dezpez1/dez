@@ -349,7 +349,37 @@ struct Uniforms {
     // lab** — a form that does looks right in the lab and then renders with
     // that whole term at zero on a phone.
     float4 lab;
+
+    // x = bass, y = mid, z = treble — smoothed 0..1 mic envelopes.
+    // w = integrated audio drift-seconds (FieldState.audioDriftTime). A rate
+    // cannot multiply `drift` — drift comes from absolute time, so scaling it
+    // teleports position every time the envelope moves. Swift integrates;
+    // this side only ever ADDS. Zero (no mic, tiles, denied permission) must
+    // render exactly the audio-less frame.
+    float4 audio;
 };
+
+// ── Audio ───────────────────────────────────────────────────────────────────
+// The room, through the mic. Everything audio touches is phase, hue, or the
+// amplitude of an existing slow oscillation — never `col`, never `shade`. The
+// waiver on the photosensitivity constraint is on record for this feature, but
+// a field that breathes with a track beats one that blinks at it, and the
+// AudioDynamics smoothing (FieldState.swift) keeps the driving signal itself
+// below the 3–60Hz band regardless. u.audio.xyz are 0…1 band envelopes;
+// u.audio.w is the integrated drift bonus, whose story is at `driftA` in the
+// field pass.
+
+// How much a full mid band swells the breath's scale pulse. Amplitude of an
+// oscillation that already ships at ≤0.077Hz — no new frequency content.
+constant float AUDIO_BREATH = 0.5;
+
+// Extra churn the bass drives through the mycelial mat — tap contributes 1.2
+// on the same line. Worley phase only; it cannot brighten anything.
+constant float AUDIO_CHURN = 0.8;
+
+// How far the kaleidoscope's palette coordinate leans with the mid band, in
+// trips around the wheel. 0.05 is a lean, not a lap.
+constant float AUDIO_HUE = 0.05;
 
 // xy = position in field space, z = birth time, w = strength.
 //
@@ -1336,7 +1366,7 @@ static inline TreeHit mycelialTree(float2 p, float grown, float drift) {
 /// view back, which shrinks the colony on screen and buys it room for another
 /// couple of levels, and it grows into them.
 static inline float mycelialField(float2 p, float drift, float time,
-                                  float breathWave, float tap,
+                                  float breathWave, float tap, float bass,
                                   float grown, float push, float pxSize,
                                   float4 lab,
                                   thread float &detail, thread float &shade) {
@@ -1435,7 +1465,9 @@ static inline float mycelialField(float2 p, float drift, float time,
     // A tap drives the churn forward, so the network visibly reorganises rather
     // than only brightening. The idle term is deliberately tiny: a net still
     // rearranging itself long after it grew is a net that was never growing.
-    float churn = drift * 0.012 + tap * 1.2;
+    // Bass joins the same sum — the mat pulses with the beat the way it pulses
+    // with a tap, and a Worley phase cannot brighten anything.
+    float churn = drift * 0.012 + tap * 1.2 + bass * AUDIO_CHURN;
 
     float dTex = 0.0;
     float tex = mycelialLayer(p * TREE_TEX_SCALE, drift, churn,
@@ -1544,9 +1576,12 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float2 p = (uv - 0.5) * float2(res.x / max(res.y, 1.0), 1.0);
 
     // Breath drives a slow scale pulse. Grounding deepens it and slows the
-    // field's own motion toward stillness.
+    // field's own motion toward stillness. Music deepens it too — amplitude
+    // only, on the mid band's slow envelope; the breath's own rate is
+    // untouched, so this can't put a new frequency on screen.
     float breathWave = sin(breath * TAU);
-    float zoom = 1.0 + breathWave * mix(0.035, 0.075, grounding);
+    float zoom = 1.0 + breathWave * mix(0.035, 0.075, grounding)
+                     * (1.0 + AUDIO_BREATH * u.audio.y);
     // Hold and tap both swell the shapes as they brighten — smaller p
     // magnifies, so these subtract. Shape and light moving together is what
     // sells either as one pulse rather than a brightness effect laid over a
@@ -1556,6 +1591,21 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
 
     // Grounding slows drift to a near-stop rather than freezing hard.
     float drift = (time + seed * 7.0) * mix(1.0, 0.22, grounding);
+
+    // What the music has bought. u.audio.w is drift-SECONDS, integrated on the
+    // Swift side (FieldState.audioDriftTime) — never a multiplier on `drift`,
+    // because drift is absolute time wearing a hat: scale it by an envelope
+    // and you move *position*, not speed. Ten minutes in, a 5% envelope dip is
+    // a thirty-drift-second lurch backwards. Adding an integral is the only
+    // shape of this that cannot jump — the same lesson the tunnel's surge
+    // taught, from the other direction.
+    //
+    // The kaleidoscope stays on plain `drift`, deliberately: its feedback
+    // contraction (below) assumes KALEIDO_ZOOM_RATE against a constant clock,
+    // and a trail contracted at yesterday's speed under a zoom running at
+    // today's is the difference between motion and smear. It hears the music
+    // through hue instead — see below.
+    float driftA = drift + u.audio.w;
 
     // One screen pixel, in the same units as `p`. Exact rather than measured:
     // p is a linear function of uv, so the step per pixel down the screen is
@@ -1569,11 +1619,15 @@ fragment float4 fieldFragment(VertexOut in [[stage_in]],
     float t;
     if (form == FORM_KALEIDOSCOPE) {
         t = kaleidoscopeField(p, drift, breathWave, u.lab, detail);
+        // Its audio: a bounded hue lean rather than a faster clock — see
+        // driftA for why this form's clock cannot move. Pure phase on the
+        // slowest envelope; it returns as the music quiets.
+        t += AUDIO_HUE * u.audio.y;
     } else if (form == FORM_LOBES) {
-        t = lobesField(p, drift, breathWave, pxSize,
+        t = lobesField(p, driftA, breathWave, pxSize,
                        LOBES_HUE_SPAN * u.palA.w, u.lab, detail, shade);
     } else {
-        t = mycelialField(p, drift, time, breathWave, tap,
+        t = mycelialField(p, driftA, time, breathWave, tap, u.audio.x,
                           u.colony.x, u.colony.y, pxSize, u.lab, detail, shade);
     }
 

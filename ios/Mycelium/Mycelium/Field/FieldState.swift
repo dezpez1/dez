@@ -130,6 +130,64 @@ enum Colony {
     /// enough that the colony doesn't vanish to a speck.
 }
 
+/// How the field listens. The mic analyser (Audio/, app-only) turns the room
+/// into three 0…1 band envelopes plus an onset; these are the attack/release
+/// time constants it smooths with, and the rate at which music buys extra
+/// drift travel. They live here rather than next to the analyser because Field
+/// Lab compiles this file and not the analyser — the lab's synthetic `--audio`
+/// waveforms and the phone's real microphone have to agree on what "smoothed"
+/// means, or the lab tunes against dynamics the app doesn't have.
+///
+/// The taus are also this feature's photosensitivity story. The waiver is on
+/// record, but every seam the audio reaches still modulates phase, hue or
+/// breath amplitude — never luminance — and these constants keep the driving
+/// signal itself far below the 3–60Hz band: a 130bpm kick is 2.2Hz, and
+/// through a 0.15s attack / 0.9s release envelope it arrives as swell, not
+/// strobe.
+enum AudioDynamics {
+    static let bassAttack: Float = 0.15
+    static let bassRelease: Float = 0.9
+    static let midAttack: Float = 0.25
+    static let midRelease: Float = 1.2
+    static let trebleAttack: Float = 0.12
+    static let trebleRelease: Float = 0.7
+    /// Onset is computed and logged but reaches no shader seam yet — if it
+    /// ever does, phase and position parameters only.
+    static let onsetAttack: Float = 0.05
+    static let onsetRelease: Float = 0.35
+
+    /// Extra drift-seconds per second at full bass+mid. 0.8 means loud music
+    /// runs colour travel and morph at ~1.8x; silence leaves them exactly at
+    /// the shipped ambient rate.
+    static let driftRate: Float = 0.8
+}
+
+/// One attack/release smoother over the four band channels — the classic
+/// one-pole envelope follower, attack tau when the target is above the value,
+/// release tau when below.
+///
+/// Shared by the phone's analyser and the lab's synthetic `--audio` waveforms,
+/// and that sharing is the point: "smoothed" has to mean exactly one thing, or
+/// the lab tunes the shader against dynamics the phone doesn't have.
+struct AudioEnvelope {
+    private(set) var value: SIMD4<Float> = .zero
+
+    private static let attack = SIMD4<Float>(
+        AudioDynamics.bassAttack, AudioDynamics.midAttack,
+        AudioDynamics.trebleAttack, AudioDynamics.onsetAttack)
+    private static let release = SIMD4<Float>(
+        AudioDynamics.bassRelease, AudioDynamics.midRelease,
+        AudioDynamics.trebleRelease, AudioDynamics.onsetRelease)
+
+    mutating func advance(toward target: SIMD4<Float>, dt: Float) {
+        guard dt > 0 else { return }
+        for i in 0..<4 {
+            let tau = target[i] > value[i] ? Self.attack[i] : Self.release[i]
+            value[i] += (target[i] - value[i]) * (1 - exp(-dt / tau))
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class FieldState {
@@ -174,6 +232,33 @@ final class FieldState {
     private(set) var zoomPush: Float = 0
     private(set) var pushDelta: Float = 0
     private var zoomPushTarget: Float = 0
+
+    /// The room, as the analyser hears it: x bass, y mid, z treble, w onset,
+    /// each already smoothed to 0…1 with the `AudioDynamics` taus. Set from
+    /// outside — AudioPipeline on a phone, sliders or a synthetic waveform in
+    /// Field Lab — and read every frame by both renderers. Nothing feeding it
+    /// leaves it zero, and zero renders exactly the audio-less frame.
+    var audioLevel: SIMD4<Float> = .zero
+
+    /// Drift-seconds of extra colour/morph travel the music has bought,
+    /// integrated in `advance`. An integral rather than a multiplier for the
+    /// same reason the tunnel's surge was: a rate applied to absolute time
+    /// moves position, not speed. See the `audio` uniform in Uniforms.swift.
+    private(set) var audioDriftTime: Float = 0
+
+    /// True while the capture circle is held and a voice note is recording.
+    /// State only — the recorder is driven from the touch layer; this is what
+    /// the glyph watches.
+    private(set) var isCapturing: Bool = false
+
+    /// Fired at the end of `addBloom` — the session log's hook. A closure
+    /// rather than a protocol so the lab, which compiles this file, never has
+    /// to know what a log is.
+    var onBloom: ((Bloom) -> Void)?
+
+    /// Same idea for grounding: fired when the target actually flips, not on
+    /// every repeated set from the touch machinery.
+    var onGround: ((Bool) -> Void)?
 
     /// Stable per-session seed so the same session looks like itself.
     ///
@@ -234,6 +319,18 @@ final class FieldState {
             grounding = groundingTarget
         }
 
+        // ── Audio drift ────────────────────────────────────────────────────
+        // Music buys extra travel by integration, never by scaling `drift` in
+        // the shader. Drift is derived from absolute time, so multiplying it
+        // by an envelope moves *position*, not speed — at t=600s a 5% envelope
+        // dip is a 30-drift-second lurch backwards. Accumulating here, where
+        // there is a dt, makes loudness a speed. Grounding damps it by the
+        // same 0.22 the shader stills drift with, so Ground Me wins over loud
+        // music instead of arguing with it.
+        audioDriftTime += deltaTime * AudioDynamics.driftRate
+            * (0.5 * audioLevel.x + 0.5 * audioLevel.y)
+            * simd_mix(1.0, 0.22, grounding)
+
         let cycle = simd_mix(Breath.ambientCycleSeconds, Breath.groundedCycleSeconds, grounding)
         breathPhase += deltaTime / cycle
         if breathPhase > 1 { breathPhase -= floor(breathPhase) }
@@ -275,6 +372,9 @@ final class FieldState {
         zoomPush = 0
         zoomPushTarget = 0
         pushDelta = 0
+        audioLevel = .zero
+        audioDriftTime = 0
+        isCapturing = false
     }
 
     func addBloom(x: Float, y: Float, strength: Float = 1.0) {
@@ -295,10 +395,17 @@ final class FieldState {
         if blooms.count > Self.maxBlooms {
             blooms.removeFirst(blooms.count - Self.maxBlooms)
         }
+
+        // After the trim, deliberately: the ring above is the live picture,
+        // the hook is the permanent record, and the record wants every bloom
+        // regardless of what the picture still has room for.
+        onBloom?(bloom)
     }
 
     func setGrounding(_ active: Bool) {
+        let was = groundingTarget > 0.5
         groundingTarget = active ? 1 : 0
+        if was != active { onGround?(active) }
     }
 
     /// Where the zoom was when the current pinch started. The gesture reports an
@@ -328,6 +435,12 @@ final class FieldState {
     func setHolding(_ active: Bool) {
         if active && holdTarget == 0 { holdPhase = 0 }
         holdTarget = active ? 1 : 0
+    }
+
+    /// The capture circle is down (or up). The recorder is driven from the
+    /// touch layer alongside this; the state exists so the glyph can watch it.
+    func setCapturing(_ active: Bool) {
+        isCapturing = active
     }
 
     /// Where in the breath cycle we are, as a 0…1 "fullness" value.
