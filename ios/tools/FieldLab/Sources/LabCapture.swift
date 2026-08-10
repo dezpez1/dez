@@ -31,6 +31,62 @@ import Metal
 import UniformTypeIdentifiers
 import simd
 
+/// A synthetic room. `--audio` drives `state.audioLevel` with one of these,
+/// pushed through the same `AudioEnvelope` smoothing the phone's analyser
+/// applies — a raw square wave is a thing no analyser ever emits, and a capture
+/// measured against one would be evidence about nothing.
+///
+///     --audio const:0.7            bass 0.7, the rest 0
+///     --audio const:1,1,1          all three bands held at full
+///     --audio sine:0.5             every band swelling at 0.5Hz
+///     --audio pulse:2              a 2Hz beat at 25% duty — the strobe check
+///     --audio ramp:20              silence to full over 20 seconds, then held
+///
+/// The window uses these too (LabSettings.audioWave), so the live tuning loop
+/// and the headless measurement cannot drift apart.
+enum AudioWave {
+    case constant(SIMD4<Float>)
+    case sine(hz: Float)
+    case pulse(hz: Float)
+    case ramp(seconds: Float)
+
+    init?(spec: String) {
+        let parts = spec.split(separator: ":", maxSplits: 1)
+        guard let kind = parts.first else { return nil }
+        let arg = parts.count > 1 ? String(parts[1]) : ""
+        switch kind {
+        case "const":
+            var v = SIMD4<Float>(repeating: 0)
+            for (n, f) in arg.split(separator: ",").compactMap({ Float($0) })
+                .prefix(4).enumerated() { v[n] = f }
+            self = .constant(v)
+        case "sine":  self = .sine(hz: Float(arg) ?? 0.5)
+        case "pulse": self = .pulse(hz: Float(arg) ?? 2.0)
+        case "ramp":  self = .ramp(seconds: Float(arg) ?? 10)
+        default: return nil
+        }
+    }
+
+    /// The raw target at time `t` — what the room is doing, before the
+    /// envelope decides how fast the field is allowed to hear it.
+    func value(at t: Float) -> SIMD4<Float> {
+        switch self {
+        case .constant(let v):
+            return v
+        case .sine(let hz):
+            let s = 0.5 + 0.5 * sin(2 * Float.pi * hz * t)
+            return SIMD4(s, s, s, 0)
+        case .pulse(let hz):
+            let phase = (t * hz).truncatingRemainder(dividingBy: 1)
+            let on: Float = phase < 0.25 ? 1 : 0
+            return SIMD4(on, on, on, on)
+        case .ramp(let seconds):
+            let r = min(max(t / max(seconds, 0.01), 0), 1)
+            return SIMD4(r, r, r, 0)
+        }
+    }
+}
+
 struct CaptureJob {
     var output: URL
     var stats = false
@@ -40,6 +96,10 @@ struct CaptureJob {
     var width = 402
     var height = 874
     var lab = SIMD4<Float>(repeating: 0)
+    var audio: AudioWave?
+    /// Kept verbatim for the "wrote" line, so a capture with a room in it says
+    /// so — a stale audio-less file is otherwise indistinguishable by eye.
+    var audioSpec: String?
 
     /// Pinned, not random. Two captures of the same shader have to be the same
     /// image or the tool is not a measuring instrument — the first version of
@@ -74,6 +134,11 @@ struct CaptureJob {
                     let parts = v.split(separator: ",").compactMap { Float($0) }
                     for (n, f) in parts.prefix(4).enumerated() { lab[n] = f }
                 }
+            case "--audio":
+                if let v = next() {
+                    audio = AudioWave(spec: v)
+                    audioSpec = audio != nil ? v : nil
+                }
             default: break
             }
             i += 1
@@ -96,8 +161,9 @@ enum CaptureRunner {
             try render(job)
             // Reported so a caller can tell a real render from a stale file it
             // is about to measure by mistake.
+            let audio = job.audioSpec.map { ", audio \($0)" } ?? ""
             print("wrote \(job.output.path) — \(job.form.title), " +
-                  "\(job.width)x\(job.height), t=\(job.seconds)s")
+                  "\(job.width)x\(job.height), t=\(job.seconds)s" + audio)
             exit(0)
         } catch {
             FileHandle.standardError.write(
@@ -145,8 +211,19 @@ enum CaptureRunner {
         let step: Float = 1.0 / 60.0
         let frames = max(Int((job.seconds / step).rounded()), 1)
 
-        for _ in 0..<frames {
+        var audioEnv = AudioEnvelope()
+        for frame in 0..<frames {
             guard let cmd = queue.makeCommandBuffer() else { break }
+
+            // The synthetic room, heard through the same smoothing as the real
+            // one. Set before encodeFrame so the drift integral in
+            // FieldState.advance sees this frame's level, not last frame's.
+            if let wave = job.audio {
+                audioEnv.advance(toward: wave.value(at: Float(frame) * step),
+                                 dt: step)
+                state.audioLevel = audioEnv.value
+            }
+
             let rpd = MTLRenderPassDescriptor()
             rpd.colorAttachments[0].texture = target
             rpd.colorAttachments[0].loadAction = .dontCare

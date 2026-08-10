@@ -19,6 +19,12 @@ struct LabSlider: Identifiable {
     var channel: String { ["x", "y", "z", "w"][id] }
 }
 
+/// What the window's synthetic room is doing: sitting at the slider levels, or
+/// running one of the capture path's waveforms.
+enum AudioWaveKind: String, CaseIterable {
+    case off, sine, pulse
+}
+
 @MainActor
 @Observable
 final class LabSettings {
@@ -32,6 +38,23 @@ final class LabSettings {
     var lab: SIMD4<Float> {
         SIMD4(sliders[0].value, sliders[1].value,
               sliders[2].value, sliders[3].value)
+    }
+
+    /// The synthetic room. Levels feed the field when the wave is off; a wave
+    /// overrides them. Either way the renderer pushes it through AudioEnvelope
+    /// before it reaches `state.audioLevel`, so the window, a capture and the
+    /// phone all agree on what "smoothed" means.
+    var audioWaveKind: AudioWaveKind = .off
+    var audioHz: Float = 0.5
+    var audioLevels: [Float] = [0, 0, 0, 0]
+
+    var audioWave: AudioWave {
+        switch audioWaveKind {
+        case .off:   return .constant(SIMD4(audioLevels[0], audioLevels[1],
+                                            audioLevels[2], audioLevels[3]))
+        case .sine:  return .sine(hz: audioHz)
+        case .pulse: return .pulse(hz: audioHz)
+        }
     }
 
     /// 0 means "whatever shape the window is". Anything else is height ÷ width,

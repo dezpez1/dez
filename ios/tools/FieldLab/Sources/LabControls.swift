@@ -87,6 +87,7 @@ private struct ControlPane: View {
                 FormBlock(engine: engine)
                 TimeBlock(engine: engine)
                 SliderBlock(engine: engine)
+                AudioBlock(engine: engine)
                 GestureBlock(engine: engine)
                 Text("""
                 Click for a tap. Click and rest for the hold. Right-click and \
@@ -303,6 +304,64 @@ private struct Bound: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 10, design: .monospaced))
                 .frame(width: 62)
+        }
+    }
+}
+
+private struct AudioBlock: View {
+    let engine: LabEngine
+
+    private static let bands = ["bass", "mid", "treble", "onset"]
+
+    var body: some View {
+        let s = engine.settings
+
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel("Audio", icon: "waveform")
+
+            Picker("", selection: Binding(
+                get: { s.audioWaveKind },
+                set: { s.audioWaveKind = $0 })) {
+                ForEach(AudioWaveKind.allCases, id: \.self) { kind in
+                    Text(kind.rawValue).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if s.audioWaveKind == .off {
+                ForEach(0..<4, id: \.self) { i in
+                    HStack(spacing: 6) {
+                        Text(Self.bands[i])
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(width: 40, alignment: .leading)
+                        Slider(value: Binding(
+                            get: { Double(s.audioLevels[i]) },
+                            set: { s.audioLevels[i] = Float($0) }), in: 0...1)
+                        Text(LabSliderRow.format(s.audioLevels[i]))
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Text(String(format: "%.2f Hz", s.audioHz))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 56, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(s.audioHz) },
+                        set: { s.audioHz = Float($0) }), in: 0.05...3)
+                }
+            }
+
+            Text("""
+            A synthetic room. Levels arrive through the same attack/release \
+            smoothing the phone's analyser applies, so what you tune against \
+            here is what the microphone will produce there.
+            """)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

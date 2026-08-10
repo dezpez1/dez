@@ -47,6 +47,16 @@ four taps at the throttle interval — one tap tells you almost nothing about th
 bloom envelope, and whether four of them sum into a swell or stack into a flash
 is a safety property.
 
+**Audio** — a synthetic room for the field's mic-reactivity. Off, it is four
+band sliders (bass/mid/treble/onset); sine and pulse are waveforms with a rate
+slider. Either way the level reaches `state.audioLevel` through the same
+`AudioEnvelope` smoothing the phone's analyser applies, so what you tune
+against here is what the microphone will produce there. `--audio` is the same
+thing headless (see the flag table), and being able to sweep a *rate* at a
+fixed timestep matters: the capture loop is the only instrument in this repo
+that can sample above the ~2.8Hz ceiling that killed the screenshot-based
+flicker measurement.
+
 **Compile errors** appear over the field, and the previous good shader keeps
 running underneath. That is deliberate: the question you are asking is "what did
 I just break", and you want the thing you broke still on screen.
@@ -89,10 +99,11 @@ shader.
 |---|---|
 | `--capture <path>` | render offscreen and exit |
 | `--at <seconds>` | simulated time to render to (default 10) |
-| `--form <name\|n>` | mycelial, kaleidoscope, tunnel, weave |
+| `--form <name\|n>` | mycelial, kaleidoscope, lobes |
 | `--palette <n>` | index into that form's palettes |
 | `--seed <n>` | default 42 |
 | `--lab a,b,c,d` | slider values, so a sweep can be a shell loop |
+| `--audio <spec>` | a synthetic room: `const:x[,y,z,w]`, `sine:<hz>`, `pulse:<hz>`, `ramp:<s>` |
 | `--width` / `--height` | default 402x874, an iPhone 17 Pro in points |
 | `--stats` | print mean luminance, near-black % and blown-out % |
 

@@ -65,6 +65,12 @@ final class LabRenderer: NSObject, MTKViewDelegate {
     private var pendingSource: String?
     private let compileQueue = DispatchQueue(label: "fieldlab.compile", qos: .userInitiated)
 
+    // The window's stand-in for a microphone. Field time rather than wall
+    // time, so a pulse wave slows down with the time-scale slider the same way
+    // everything else does.
+    private var audioEnv = AudioEnvelope()
+    private var audioClock: Float = 0
+
     // These four must track FieldRenderer. See the file comment.
     private static let accumFormat: MTLPixelFormat = .rgba16Float
     private static let fieldScale: CGFloat = 0.72
@@ -287,6 +293,15 @@ final class LabRenderer: NSObject, MTKViewDelegate {
                   let cmd = queue.makeCommandBuffer() else { return }
 
             if accum.count < 2 || bloom.count < 3 { resize(view.drawableSize) }
+
+            // The synthetic room, before encodeFrame for the same reason the
+            // capture path does it there: the drift integral has to see this
+            // frame's level.
+            audioClock += dt
+            audioEnv.advance(toward: settings.audioWave.value(at: audioClock),
+                             dt: dt)
+            state.audioLevel = audioEnv.value
+
             encodeFrame(cmd: cmd, dt: dt, into: rpd, lab: settings.lab)
             cmd.present(drawable)
             cmd.commit()
@@ -328,7 +343,12 @@ final class LabRenderer: NSObject, MTKViewDelegate {
                 palB: SIMD4<Float>(pal.b.x, pal.b.y, pal.b.z, 0),
                 palC: SIMD4<Float>(pal.c.x, pal.c.y, pal.c.z, 0),
                 palD: SIMD4<Float>(pal.d.x, pal.d.y, pal.d.z, 0),
-                lab: lab)
+                lab: lab,
+                // Same fill as FieldRenderer's, from the same state — the lab
+                // drives `state.audioLevel` from its sliders or a synthetic
+                // waveform where the app drives it from the microphone.
+                audio: SIMD4(state.audioLevel.x, state.audioLevel.y,
+                             state.audioLevel.z, state.audioDriftTime))
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
 
             var packed = state.packedBlooms
