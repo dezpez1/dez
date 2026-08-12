@@ -233,10 +233,12 @@ it is also why echo cancellation stays OFF: voice processing exists to remove
 what this phone's own speaker is playing, which is exactly the signal we want.
 
 ```
-mic ─▶ ring buffer ─▶ Hann ─▶ 1024-pt FFT ─▶ bands ─▶ AGC ─▶ gate ─▶ envelope
-                                                     (15s)  (−55dB)  (taus below)
-      ─▶ 30Hz publish ─▶ state.audioLevel ─▶ u.audio ─▶ the seams
-      ─▶ 10Hz         ─▶ audio.jsonl (replay's copy)
+mic ─▶ ring buffer ─▶ RMS gate ─▶ Hann ─▶ 2048-pt FFT ─▶ band powers
+                      (−60dBFS)                             │
+       loudness = dB above a clamped noise floor ◀───────────┤
+       bands    = that loudness × spectral share ◀───────────┘
+      ─▶ envelope (taus below) ─▶ 30Hz publish ─▶ state.audioLevel ─▶ u.audio
+                                ─▶ 10Hz        ─▶ audio.jsonl (replay's copy)
 ```
 
 ### The smoothing is the safety story
@@ -258,9 +260,52 @@ smoothing stage is what keeps that argument true.
 | treble (z) | 0.12s | 0.7s | nothing yet — computed and logged |
 | onset (w) | 0.05s | 0.35s | nothing yet — computed and logged |
 
-Per-band AGC (peak follower, ~15s release) means a quiet speaker and a loud
-party both land in 0…1 without a knob; the −55dBFS gate is what stops the AGC
-from dutifully normalising mic hiss into a strobing empty room.
+### Turning a room into 0…1 — three wrong answers first
+
+This is the part that shipped broken, and it shipped broken because "the
+plumbing is connected" was mistaken for "the feature works". The end-to-end
+test that caught it: play music at the simulator, screenshot the field every
+two seconds, and compare the frame-to-frame change against a silent run. It
+came back **0.97x — no effect whatsoever.**
+
+What a direct unit test of the analyser then showed, feeding it synthetic
+audio with no microphone in the loop at all:
+
+| attempt | what it did | how it failed |
+|---|---|---|
+| mean-FFT-magnitude "dBFS" gate | divided a mean bin magnitude by the window size and called it dB | not dB in any unit. A cliff, not a floor: amplitude 0.5 came through at full scale, **0.05 measured exactly zero**. Room-level music sits below that, so nothing ever moved |
+| per-band peak AGC | each band ÷ its own recent maximum | an AGC exists to make loud and quiet sound the same — the exact distinction this feature is. Silence read 0.27, music 0.33. It also destroyed the bands: an 80Hz sine read bass 1.00 **and** mid 1.00 **and** treble 0.87, so "bass drives churn, mid drives drift" was three hats on one signal |
+| per-band noise floor | dB above each band's quiet baseline | fixes silence and separation, then fails on the sustained case: after twelve seconds of loud playback the floor has crept up, so the same track twenty decibels quieter reads **zero**. Music plays for the whole session — sustained *is* the case |
+
+What ships: **absolute dBFS above a floor that adapts but is clamped** to
+[−70, −45]. Adaptation absorbs whatever microphone this turns out to be; the
+ceiling means sustained music can never drag the floor into the useful range
+and normalise itself away. Loudness comes from the frame's RMS, and the three
+bands split that loudness by spectral share — so the absolute measurement says
+whether anything is playing and the spectrum's shape says which channel gets
+it.
+
+Measured after, on a continuous timeline through one analyser (the honest rig
+— a fresh analyser per signal hides every adaptation bug):
+
+| | bass | mid |
+|---|---|---|
+| empty room | 0.01 | 0.00 |
+| music, loud | 0.55 | 0.78 |
+| music, −20dB | 0.21 | 0.22 |
+| music, −34dB | 0.07 | 0.02 |
+| room again | 0.01 | 0.00 |
+| dead silence | 0.00 | 0.00 |
+
+Monotonic in loudness, zero when nothing is playing, and it recovers. That
+monotonicity is the property all three earlier versions lacked.
+
+Two things still open, both needing a real phone rather than a simulator. The
+floor's [−70, −45] clamp is calibrated for a phone mic in a room and has only
+been checked against a Mac's much hotter input, where ambient alone sits at
+−30dBFS. And the onset channel is computed and logged but drives no seam. To
+check the calibration on a device: play music, then read `audio.jsonl` out of
+the session directory — quiet should sit near zero and music well above it.
 
 ### The seams, and the multiply that would have been a lurch
 
